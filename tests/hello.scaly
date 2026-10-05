@@ -1,0 +1,43 @@
+; The smallest document: one page with a line in each font family, a rule, a
+; filled rectangle, a destination and a page label.
+;   width    the width of a run from the metrics
+;   pages    the number of pages
+;   bytes    the length of the file and the sum of its bytes: the same calls
+;            write the same file
+; Expected: width 53328 pages 1 bytes 1323 24949
+
+package scaly 0.1.0
+package pdf 0.1.0
+
+use pdf.Font.PdfFont
+use pdf.Document.PdfDocument
+
+procedure main(argc: int, argv: pointer[pointer[const_char]]) returns int
+{
+    var doc PdfDocument()
+    doc.begin_page(595000, 842000)
+    let font PdfFont.select("Times New Roman", false, false)
+    doc.text(font, 24000, 72000, 100000, "Hello")
+    doc.set_color(200, 0, 0)
+    doc.text(PdfFont.select("Arial", true, false), 12000, 72000, 130000, "bold (Helvetica) \\ ")
+    doc.line(72000, 140000, 523000, 140000, 500)
+    doc.fill_rectangle(72000, 150000, 100000, 20000, 220, 220, 255)
+    doc.text(PdfFont.select("Courier New", false, true), 10000, 72000, 165000, "mono")
+    doc.add_destination("top", 72000)
+    doc.add_page_label(0, 0x72, 1)
+    doc.end_page()
+    let wide PdfFont.text_width(font, 24000, "Hello")
+    let bytes doc.finish()
+    var sum 0
+    var i: size_t 0
+    while i < bytes.length
+    {
+        sum := (sum + (bytes[i] as int)) % 65521
+        i := i + 1
+    }
+    print "width `wide` pages `doc.page_count()` bytes `bytes.length` `sum`\n"
+    ; given a name, the file is kept to be looked at
+    if argc > 1
+        doc.write(String(*(argv + 1)))
+    0
+}

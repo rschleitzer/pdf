@@ -1,0 +1,147 @@
+; Font -- the standard fonts every PDF reader brings along, so that a document
+; names them and embeds nothing: Helvetica, Times and Courier, each upright
+; and italic, medium and bold. A font is its id, family + PDF_BOLD +
+; PDF_ITALIC. Text is WinAnsiEncoding (Windows code page 1252): `encode`
+; answers the code of a character, `width` the advance of a code in
+; thousandths of the font size.
+
+define PDF_HELVETICA: int 0
+define PDF_TIMES: int 4
+define PDF_COURIER: int 8
+define PDF_BOLD: int 1
+define PDF_ITALIC: int 2
+define PDF_FONT_COUNT: int 12
+
+define PdfFont (id: int)
+{
+    ; The font a family name asks for. A name nobody knows is Helvetica.
+    function select(family: Slice[u8], bold: bool, italic: bool) returns int
+    {
+        var id PDF_HELVETICA
+        if PdfFont.names(family, "courier") or PdfFont.names(family, "mono") or PdfFont.names(family, "typewriter")
+            id := PDF_COURIER
+        else if PdfFont.names(family, "sans") or PdfFont.names(family, "helvetica") or PdfFont.names(family, "arial")
+            id := PDF_HELVETICA
+        else if PdfFont.names(family, "times") or PdfFont.names(family, "serif") or PdfFont.names(family, "roman") or PdfFont.names(family, "palatino") or PdfFont.names(family, "georgia") or PdfFont.names(family, "schoolbook") or PdfFont.names(family, "bookman") or PdfFont.names(family, "garamond")
+            id := PDF_TIMES
+        if bold
+            id := id + PDF_BOLD
+        if italic
+            id := id + PDF_ITALIC
+        id
+    }
+
+    ; True when `word` (lower case) occurs in `family`, whatever its case.
+    function names(family: Slice[u8], word: Slice[u8]) returns bool
+    {
+        if word.length > family.length
+            return false
+        var at: size_t 0
+        while at + word.length <= family.length
+        {
+            var i: size_t 0
+            while i < word.length
+            {
+                var c family[at + i]
+                if c >= 0x41 and c <= 0x5A
+                    c := c + 0x20
+                if c <> word[i]
+                    break
+                i := i + 1
+            }
+            if i = word.length
+                return true
+            at := at + 1
+        }
+        false
+    }
+
+    ; The advance of a code, in thousandths of the font size.
+    function width(font: int, code: u8) returns int
+    {
+        if font >= PDF_COURIER
+            return 600
+        if code < 32
+            return 0
+        PDF_METRICS[(font as size_t) * PDF_METRICS_ROW + ((code as size_t) - 32)]
+    }
+
+    ; The width of a run at a font size, in the unit of the size.
+    function text_width(font: int, size: int, text: Slice[u8]) returns int
+    {
+        var sum 0
+        var i: size_t 0
+        while i < text.length
+        {
+            sum := sum + PdfFont.width(font, text[i])
+            i := i + 1
+        }
+        sum * size / 1000
+    }
+
+    ; How far the font rises above and falls below the baseline, in
+    ; thousandths of the font size (both positive).
+    function ascender(font: int) returns int
+    {
+        if font >= PDF_COURIER
+            return 629
+        if font >= PDF_TIMES
+            return 683
+        718
+    }
+
+    function descender(font: int) returns int
+    {
+        if font >= PDF_COURIER
+            return 157
+        if font >= PDF_TIMES
+            return 217
+        207
+    }
+
+    ; The code of a character in WinAnsiEncoding, 0 when it has none. A few
+    ; characters the encoding lacks go to the one that looks the same.
+    function encode(ch: u32) returns u8
+    {
+        if ch < 0x20
+            return 0
+        if ch < 0x7F
+            return ch as u8
+        if ch >= 0xA0 and ch <= 0xFF
+            return ch as u8
+        var i: size_t 0
+        while i < 32
+        {
+            if (PDF_WINANSI_HIGH[i] as u32) = ch
+                return (i + 128) as u8
+            i := i + 1
+        }
+        ; hyphens and the minus sign
+        if ch = 0x2010 or ch = 0x2011 or ch = 0x2212
+            return 0x2D
+        ; the spaces of fixed width
+        if ch >= 0x2000 and ch <= 0x200A
+            return 0x20
+        if ch = 0x2015
+            return 0x97
+        0
+    }
+
+    ; The name the font goes by in a PDF file.
+    function base_name(font: int) returns Slice[u8]
+    {
+        match font
+            case 0: return "Helvetica"
+            case 1: return "Helvetica-Bold"
+            case 2: return "Helvetica-Oblique"
+            case 3: return "Helvetica-BoldOblique"
+            case 4: return "Times-Roman"
+            case 5: return "Times-Bold"
+            case 6: return "Times-Italic"
+            case 7: return "Times-BoldItalic"
+            case 8: return "Courier"
+            case 9: return "Courier-Bold"
+            case 10: return "Courier-Oblique"
+        "Courier-BoldOblique"
+    }
+}

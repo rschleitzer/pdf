@@ -1,0 +1,1019 @@
+; Document -- a PDF file written page by page.
+;
+; A caller opens a page, places text, rules, filled rectangles and images on
+; it, and at the end takes the bytes of the file. Lengths are integers in
+; THOUSANDTHS OF A POINT (the DSSSL length unit at 72000 units per inch), and
+; a position is measured from the TOP LEFT corner of the page, y downwards --
+; the writer turns it into the PDF's own bottom-left coordinates. Text is a
+; run of WinAnsiEncoding codes in one of the standard fonts (pdf/Font.scaly),
+; placed at its baseline.
+;
+; The file is PDF 1.4 with uncompressed content streams and nothing that
+; depends on the day or the machine: the same calls write the same bytes.
+;
+; Everything a page holds is appended to ONE content buffer, a page being a
+; range of it; images, destinations and page labels are flat records beside
+; it. The objects are numbered and written by `finish`.
+
+use pdf.Font.PdfFont
+use pdf.Inflate.PdfInflate
+
+; the stride of the flat records
+define PDF_IMAGE_REC: size_t 11
+define PDF_DEST_REC: size_t 4
+define PDF_LABEL_REC: size_t 3
+
+; what an image's data is
+define PDF_IMAGE_JPEG: int 0
+define PDF_IMAGE_PNG: int 1
+; rows decoded and run-length coded again (a PNG with an alpha channel)
+define PDF_IMAGE_RUNS: int 2
+
+define PdfDocument
+(
+    ; the content streams of all pages, one after the other
+    var content: Array[u8]
+    ; per page: where its content begins, its width and its height
+    var page_start: Array[size_t]
+    var page_width: Array[int]
+    var page_height: Array[int]
+    ; the fonts some page names, one bit per font id
+    var fonts_used: int
+    ; images: kind, data offset, data length, width, height, components,
+    ; bits per component, palette offset, palette length, soft mask offset,
+    ; soft mask length
+    var images: Array[int]
+    var image_data: Array[u8]
+    ; destinations: name offset, name length, page, y
+    var dests: Array[int]
+    var dest_names: Array[u8]
+    ; page labels: first page, style (a character of D r R a A), first number
+    var labels: Array[int]
+    var title: Array[u8]
+    ; the state of the page being written
+    var open: bool
+    var cur_height: int
+    var cur_color: int
+    ; the file, once finished
+    var out: Array[u8]
+    var offsets: Array[size_t]
+)
+{
+    init()
+    {
+        content := Array[u8]^this()
+        page_start := Array[size_t]^this()
+        page_width := Array[int]^this()
+        page_height := Array[int]^this()
+        fonts_used := 0
+        images := Array[int]^this()
+        image_data := Array[u8]^this()
+        dests := Array[int]^this()
+        dest_names := Array[u8]^this()
+        labels := Array[int]^this()
+        title := Array[u8]^this()
+        open := false
+        cur_height := 0
+        cur_color := 0 - 1
+        out := Array[u8]^this()
+        offsets := Array[size_t]^this()
+    }
+
+    ; ---- pages --------------------------------------------------------------
+
+    procedure begin_page(mutable this, width: int, height: int)
+    {
+        page_start.add(content.get_length())
+        page_width.add(width)
+        page_height.add(height)
+        open := true
+        cur_height := height
+        cur_color := 0 - 1
+    }
+
+    procedure end_page(mutable this)
+    {
+        open := false
+    }
+
+    function page_count(this) returns int
+        page_start.get_length() as int
+
+    ; The title in the document information (WinAnsiEncoding codes).
+    procedure set_title(mutable this, text: Slice[u8])
+    {
+        title.clear()
+        title.add(text)
+    }
+
+    ; ---- marks on the open page ---------------------------------------------
+
+    ; The color of the text and rules that follow on this page.
+    procedure set_color(mutable this, red: int, green: int, blue: int)
+    {
+        let color (red << 16) | (green << 8) | blue
+        if color = cur_color
+            return
+        cur_color := color
+        this.color_operands(content, red, green, blue)
+        this.put(content, " rg ")
+        this.color_operands(content, red, green, blue)
+        this.put(content, " RG\n")
+    }
+
+    ; A run of text with its baseline at y, beginning at x.
+    procedure text(mutable this, font: int, size: int, x: int, y: int, codes: Slice[u8])
+    {
+        if codes.length = 0
+            return
+        fonts_used := fonts_used | (1 << font)
+        this.put(content, "BT /F")
+        this.put_int(content, font + 1)
+        content.add(0x20)
+        this.put_length(content, size)
+        this.put(content, " Tf ")
+        this.put_length(content, x)
+        content.add(0x20)
+        this.put_length(content, cur_height - y)
+        this.put(content, " Td ")
+        this.put_string(content, codes)
+        this.put(content, " Tj ET\n")
+    }
+
+    ; A straight line of a thickness, in the current color.
+    procedure line(mutable this, x1: int, y1: int, x2: int, y2: int, thickness: int)
+    {
+        this.put_length(content, thickness)
+        this.put(content, " w ")
+        this.put_length(content, x1)
+        content.add(0x20)
+        this.put_length(content, cur_height - y1)
+        this.put(content, " m ")
+        this.put_length(content, x2)
+        content.add(0x20)
+        this.put_length(content, cur_height - y2)
+        this.put(content, " l S\n")
+    }
+
+    ; A filled rectangle in a color of its own; (x, y) is its top left corner.
+    procedure fill_rectangle(mutable this, x: int, y: int, width: int, height: int, red: int, green: int, blue: int)
+    {
+        this.put(content, "q ")
+        this.color_operands(content, red, green, blue)
+        this.put(content, " rg ")
+        this.put_length(content, x)
+        content.add(0x20)
+        this.put_length(content, cur_height - y - height)
+        content.add(0x20)
+        this.put_length(content, width)
+        content.add(0x20)
+        this.put_length(content, height)
+        this.put(content, " re f Q\n")
+    }
+
+    ; An image (the number add_jpeg or add_png answered) scaled into a
+    ; rectangle; (x, y) is its top left corner.
+    procedure image(mutable this, number: int, x: int, y: int, width: int, height: int)
+    {
+        if number < 0 or number >= this.image_count()
+            return
+        this.put(content, "q ")
+        this.put_length(content, width)
+        this.put(content, " 0 0 ")
+        this.put_length(content, height)
+        content.add(0x20)
+        this.put_length(content, x)
+        content.add(0x20)
+        this.put_length(content, cur_height - y - height)
+        this.put(content, " cm /Im")
+        this.put_int(content, number + 1)
+        this.put(content, " Do Q\n")
+    }
+
+    ; A named destination at height y of the open page -- what a link or a
+    ; reader's "go to" aims at. A name given twice keeps its first place.
+    procedure add_destination(mutable this, name: Slice[u8], y: int)
+    {
+        if this.destination_page(name) >= 0
+            return
+        dests.add(dest_names.get_length() as int)
+        dests.add(name.length as int)
+        dests.add(this.page_count() - 1)
+        dests.add(y)
+        dest_names.add(name)
+    }
+
+    ; The page (from 0) a destination lies on, -1 when nothing has that name.
+    function destination_page(this, name: Slice[u8]) returns int
+    {
+        var i: size_t 0
+        while i < dests.get_length()
+        {
+            let at dests[i] as size_t
+            let length dests[i + 1] as size_t
+            if length = name.length
+            {
+                var k: size_t 0
+                while k < length and dest_names[at + k] = name[k]
+                    k := k + 1
+                if k = length
+                    return dests[i + 2]
+            }
+            i := i + PDF_DEST_REC
+        }
+        0 - 1
+    }
+
+    ; From this page (counted from 0) on a reader shows page numbers in a
+    ; style -- "D" decimal, "r"/"R" roman, "a"/"A" letters -- beginning at a
+    ; number.
+    procedure add_page_label(mutable this, page: int, style: u8, first: int)
+    {
+        labels.add(page)
+        labels.add(style as int)
+        labels.add(first)
+    }
+
+    ; ---- images ---------------------------------------------------------------
+
+    function image_count(this) returns int
+        (images.get_length() / PDF_IMAGE_REC) as int
+
+    ; The size of an image in its own pixels.
+    function image_width(this, number: int) returns int
+        images[(number as size_t) * PDF_IMAGE_REC + 3]
+
+    function image_height(this, number: int) returns int
+        images[(number as size_t) * PDF_IMAGE_REC + 4]
+
+    ; Take a JPEG file as it is. Answers the image's number, -1 when the
+    ; bytes are no baseline or progressive JPEG.
+    procedure add_jpeg(mutable this, data: Slice[u8]) returns int
+    {
+        if data.length < 4 or data[0] <> 0xFF or data[1] <> 0xD8
+            return 0 - 1
+        var at: size_t 2
+        while at + 9 < data.length
+        {
+            if data[at] <> 0xFF
+                return 0 - 1
+            let marker data[at + 1]
+            if marker = 0xFF
+            {
+                at := at + 1
+                continue
+            }
+            let length ((data[at + 2] as size_t) << 8) | (data[at + 3] as size_t)
+            ; a start of frame, but not the tables that share its range
+            if marker >= 0xC0 and marker <= 0xCF and marker <> 0xC4 and marker <> 0xC8 and marker <> 0xCC
+            {
+                let height ((data[at + 5] as int) << 8) | (data[at + 6] as int)
+                let width ((data[at + 7] as int) << 8) | (data[at + 8] as int)
+                let components data[at + 9] as int
+                if width = 0 or height = 0
+                    return 0 - 1
+                if components <> 1 and components <> 3 and components <> 4
+                    return 0 - 1
+                images.add(PDF_IMAGE_JPEG)
+                images.add(image_data.get_length() as int)
+                images.add(data.length as int)
+                images.add(width)
+                images.add(height)
+                images.add(components)
+                images.add(data[at + 4] as int)
+                images.add(0)
+                images.add(0)
+                images.add(0)
+                images.add(0)
+                image_data.add(data)
+                return this.image_count() - 1
+            }
+            at := at + 2 + length
+        }
+        0 - 1
+    }
+
+    ; Take a PNG file. Without an alpha channel its compressed rows go into
+    ; the PDF as they are and nothing is decoded; with one they are decoded
+    ; and the transparency becomes the image's soft mask (add_png_alpha).
+    ; Answers the image's number, -1 for what is not covered: an interlaced
+    ; image, and one of sixteen bits with an alpha channel.
+    procedure add_png(mutable this, data: Slice[u8]) returns int
+    {
+        if data.length < 33 or data[0] <> 0x89 or data[1] <> 0x50 or data[2] <> 0x4E or data[3] <> 0x47
+            return 0 - 1
+        let width this.be32(data, 16)
+        let height this.be32(data, 20)
+        let bits data[24] as int
+        let color_type data[25] as int
+        if width <= 0 or height <= 0 or data[28] <> 0
+            return 0 - 1
+        var components 1
+        if color_type = 2
+            components := 3
+        else if color_type = 4 or color_type = 6
+        {
+            if bits <> 8
+                return 0 - 1
+            return this.add_png_alpha(data, width, height, color_type - 3)
+        }
+        else if color_type <> 0 and color_type <> 3
+            return 0 - 1
+        let data_at image_data.get_length()
+        var palette_at: size_t 0
+        var palette_length: size_t 0
+        ; the chunks: the palette (kept behind the rows) and the rows
+        var at: size_t 8
+        while at + 12 <= data.length
+        {
+            let length this.be32(data, at) as size_t
+            if at + 12 + length > data.length
+                return 0 - 1
+            if data[at + 4] = 0x49 and data[at + 5] = 0x44 and data[at + 6] = 0x41 and data[at + 7] = 0x54
+                image_data.add(data.subslice(at + 8, at + 8 + length))
+            else if data[at + 4] = 0x50 and data[at + 5] = 0x4C and data[at + 6] = 0x54 and data[at + 7] = 0x45
+            {
+                palette_at := at + 8
+                palette_length := length
+            }
+            at := at + 12 + length
+        }
+        let data_length image_data.get_length() - data_at
+        if data_length = 0
+            return 0 - 1
+        if color_type = 3 and palette_length = 0
+            return 0 - 1
+        let palette_stored image_data.get_length()
+        if palette_length > 0
+            image_data.add(data.subslice(palette_at, palette_at + palette_length))
+        images.add(PDF_IMAGE_PNG)
+        images.add(data_at as int)
+        images.add(data_length as int)
+        images.add(width)
+        images.add(height)
+        images.add(components)
+        images.add(bits)
+        if color_type = 3
+        {
+            images.add(palette_stored as int)
+            images.add(palette_length as int)
+        }
+        else
+        {
+            images.add(0)
+            images.add(0)
+        }
+        images.add(0)
+        images.add(0)
+        this.image_count() - 1
+    }
+
+    ; A PNG of eight bits with an alpha channel, `colors` color components
+    ; before it: decode the rows, undo their filters, and write the colors
+    ; and the alpha values apart, each run-length coded. An image that is
+    ; opaque throughout gets no soft mask.
+    procedure add_png_alpha(mutable this, data: Slice[u8], width: int, height: int, colors: int) returns int
+    {
+        var packed Array[u8]()
+        var at: size_t 8
+        while at + 12 <= data.length
+        {
+            let length this.be32(data, at) as size_t
+            if at + 12 + length > data.length
+                return 0 - 1
+            if data[at + 4] = 0x49 and data[at + 5] = 0x44 and data[at + 6] = 0x41 and data[at + 7] = 0x54
+                packed.add(data.subslice(at + 8, at + 8 + length))
+            at := at + 12 + length
+        }
+        if packed.get_length() < 6
+            return 0 - 1
+        ; behind the two bytes of the zlib header
+        var rows Array[u8]()
+        var inflate PdfInflate()
+        if inflate.run(packed.as_slice().slice_from(2), &rows) = false
+            return 0 - 1
+        let pixel (colors + 1) as size_t
+        let stride (width as size_t) * pixel
+        if rows.get_length() < (stride + 1) * (height as size_t)
+            return 0 - 1
+        ; the filters: each row from the pixel to its left and the row above
+        var y: size_t 0
+        while y < (height as size_t)
+        {
+            let row y * (stride + 1) + 1
+            let filter rows[row - 1]
+            var x: size_t 0
+            while x < stride and filter <> 0
+            {
+                var left 0
+                var up 0
+                var corner 0
+                if x >= pixel
+                    left := rows[row + x - pixel] as int
+                if y > 0
+                {
+                    up := rows[row + x - stride - 1] as int
+                    if x >= pixel
+                        corner := rows[row + x - stride - 1 - pixel] as int
+                }
+                var predicted 0
+                if filter = 1
+                    predicted := left
+                else if filter = 2
+                    predicted := up
+                else if filter = 3
+                    predicted := (left + up) / 2
+                else
+                {
+                    ; Paeth: of the three the one nearest to left + up - corner
+                    var a left + up - corner - left
+                    var b left + up - corner - up
+                    var c left + up - corner - corner
+                    if a < 0
+                        a := 0 - a
+                    if b < 0
+                        b := 0 - b
+                    if c < 0
+                        c := 0 - c
+                    predicted := corner
+                    if a <= b and a <= c
+                        predicted := left
+                    else if b <= c
+                        predicted := up
+                }
+                rows.put(row + x, (((rows[row + x] as int) + predicted) & 255) as u8)
+                x := x + 1
+            }
+            y := y + 1
+        }
+        ; the colors and the alpha values, apart
+        var plane Array[u8]()
+        var mask Array[u8]()
+        var opaque true
+        y := 0
+        while y < (height as size_t)
+        {
+            let row y * (stride + 1) + 1
+            var x: size_t 0
+            while x < stride
+            {
+                var k: size_t 0
+                while k + 1 < pixel
+                {
+                    plane.add(rows[row + x + k])
+                    k := k + 1
+                }
+                let alpha rows[row + x + k]
+                if alpha <> 255
+                    opaque := false
+                mask.add(alpha)
+                x := x + pixel
+            }
+            y := y + 1
+        }
+        let data_at image_data.get_length()
+        PdfInflate.run_lengths(plane.as_slice(), &image_data)
+        let mask_at image_data.get_length()
+        if opaque = false
+            PdfInflate.run_lengths(mask.as_slice(), &image_data)
+        images.add(PDF_IMAGE_RUNS)
+        images.add(data_at as int)
+        images.add((mask_at - data_at) as int)
+        images.add(width)
+        images.add(height)
+        images.add(colors)
+        images.add(8)
+        images.add(0)
+        images.add(0)
+        images.add(mask_at as int)
+        images.add((image_data.get_length() - mask_at) as int)
+        this.image_count() - 1
+    }
+
+    ; The size in pixels of an image file, without taking it: true for a
+    ; JPEG or PNG whose head can be read.
+    procedure probe(data: Slice[u8], mutable width: ref[int], mutable height: ref[int]) returns bool
+    {
+        if data.length >= 33 and data[0] = 0x89 and data[1] = 0x50 and data[2] = 0x4E and data[3] = 0x47
+        {
+            width := ((data[16] as int) << 24) | ((data[17] as int) << 16) | ((data[18] as int) << 8) | (data[19] as int)
+            height := ((data[20] as int) << 24) | ((data[21] as int) << 16) | ((data[22] as int) << 8) | (data[23] as int)
+            return true
+        }
+        if data.length < 4 or data[0] <> 0xFF or data[1] <> 0xD8
+            return false
+        var at: size_t 2
+        while at + 9 < data.length and data[at] = 0xFF
+        {
+            let marker data[at + 1]
+            if marker = 0xFF
+            {
+                at := at + 1
+                continue
+            }
+            if marker >= 0xC0 and marker <= 0xCF and marker <> 0xC4 and marker <> 0xC8 and marker <> 0xCC
+            {
+                height := ((data[at + 5] as int) << 8) | (data[at + 6] as int)
+                width := ((data[at + 7] as int) << 8) | (data[at + 8] as int)
+                return true
+            }
+            at := at + 2 + (((data[at + 2] as size_t) << 8) | (data[at + 3] as size_t))
+        }
+        false
+    }
+
+    function be32(this, data: Slice[u8], at: size_t) returns int
+        ((data[at] as int) << 24) | ((data[at + 1] as int) << 16) | ((data[at + 2] as int) << 8) | (data[at + 3] as int)
+
+    ; ---- the file -------------------------------------------------------------
+
+    ; Write the objects and answer the bytes of the file. The document takes
+    ; no more pages afterwards.
+    procedure finish(mutable this) returns Slice[u8]
+    {
+        if out.get_length() > 0
+            return out.as_slice()
+        open := false
+        let n_pages page_start.get_length()
+        let n_images this.image_count() as size_t
+        ; the numbers of the objects: catalog, page tree, the fonts in use,
+        ; the images, a page and its content each, destinations, information
+        var font_object Vector[size_t](12)
+        var next: size_t 3
+        var f 0
+        while f < PDF_FONT_COUNT
+        {
+            font_object.put(f as size_t, 0)
+            if (fonts_used & (1 << f)) <> 0
+            {
+                font_object.put(f as size_t, next)
+                next := next + 1
+            }
+            f := f + 1
+        }
+        let first_image next
+        var i: size_t 0
+        while i < n_images
+        {
+            next := next + 1
+            if images[i * PDF_IMAGE_REC + 10] > 0
+                next := next + 1
+            i := i + 1
+        }
+        let first_page next
+        next := next + n_pages * 2
+        var dests_object: size_t 0
+        if dests.get_length() > 0
+        {
+            dests_object := next
+            next := next + 1
+        }
+        let info_object next
+        let count next + 1
+
+        this.put(out, "%PDF-1.4\n%")
+        out.add(0xE2)
+        out.add(0xE3)
+        out.add(0xCF)
+        out.add(0xD3)
+        out.add(0x0A)
+
+        ; 1: the catalog
+        this.begin_object(1)
+        this.put(out, "<< /Type /Catalog /Pages 2 0 R")
+        if dests_object <> 0
+        {
+            this.put(out, " /Dests ")
+            this.put_int(out, dests_object as int)
+            this.put(out, " 0 R")
+        }
+        if labels.get_length() > 0
+        {
+            this.put(out, " /PageLabels << /Nums [")
+            var l: size_t 0
+            while l < labels.get_length()
+            {
+                out.add(0x20)
+                this.put_int(out, labels[l])
+                this.put(out, " << /S /")
+                out.add(labels[l + 1] as u8)
+                this.put(out, " /St ")
+                this.put_int(out, labels[l + 2])
+                this.put(out, " >>")
+                l := l + PDF_LABEL_REC
+            }
+            this.put(out, " ] >>")
+        }
+        this.put(out, " >>\nendobj\n")
+
+        ; 2: the page tree
+        this.begin_object(2)
+        this.put(out, "<< /Type /Pages /Count ")
+        this.put_int(out, n_pages as int)
+        this.put(out, " /Kids [")
+        var p: size_t 0
+        while p < n_pages
+        {
+            out.add(0x20)
+            this.put_int(out, (first_page + p * 2) as int)
+            this.put(out, " 0 R")
+            p := p + 1
+        }
+        this.put(out, " ] >>\nendobj\n")
+
+        ; the fonts
+        f := 0
+        while f < PDF_FONT_COUNT
+        {
+            if font_object[f as size_t] <> 0
+            {
+                this.begin_object(font_object[f as size_t])
+                this.put(out, "<< /Type /Font /Subtype /Type1 /BaseFont /")
+                this.put(out, PdfFont.base_name(f))
+                this.put(out, " /Encoding /WinAnsiEncoding >>\nendobj\n")
+            }
+            f := f + 1
+        }
+
+        ; the images, each followed by its soft mask if it has one
+        i := 0
+        while i < n_images
+        {
+            this.write_image(this.image_object(first_image, i), i * PDF_IMAGE_REC)
+            i := i + 1
+        }
+
+        ; the pages, each followed by its content
+        p := 0
+        while p < n_pages
+        {
+            let begin page_start[p]
+            var end content.get_length()
+            if p + 1 < n_pages
+                end := page_start[p + 1]
+            this.begin_object(first_page + p * 2)
+            this.put(out, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ")
+            this.put_length(out, page_width[p])
+            out.add(0x20)
+            this.put_length(out, page_height[p])
+            this.put(out, "] /Resources << /ProcSet [/PDF /Text /ImageB /ImageC /ImageI]")
+            if fonts_used <> 0
+            {
+                this.put(out, " /Font <<")
+                f := 0
+                while f < PDF_FONT_COUNT
+                {
+                    if font_object[f as size_t] <> 0
+                    {
+                        this.put(out, " /F")
+                        this.put_int(out, f + 1)
+                        out.add(0x20)
+                        this.put_int(out, font_object[f as size_t] as int)
+                        this.put(out, " 0 R")
+                    }
+                    f := f + 1
+                }
+                this.put(out, " >>")
+            }
+            if n_images > 0
+            {
+                this.put(out, " /XObject <<")
+                i := 0
+                while i < n_images
+                {
+                    this.put(out, " /Im")
+                    this.put_int(out, (i + 1) as int)
+                    out.add(0x20)
+                    this.put_int(out, this.image_object(first_image, i) as int)
+                    this.put(out, " 0 R")
+                    i := i + 1
+                }
+                this.put(out, " >>")
+            }
+            this.put(out, " >> /Contents ")
+            this.put_int(out, (first_page + p * 2 + 1) as int)
+            this.put(out, " 0 R >>\nendobj\n")
+
+            this.begin_object(first_page + p * 2 + 1)
+            this.put(out, "<< /Length ")
+            this.put_int(out, (end - begin) as int)
+            this.put(out, " >>\nstream\n")
+            out.add(content.as_slice().subslice(begin, end))
+            this.put(out, "endstream\nendobj\n")
+            p := p + 1
+        }
+
+        ; the destinations
+        if dests_object <> 0
+        {
+            this.begin_object(dests_object)
+            this.put(out, "<<")
+            var d: size_t 0
+            while d < dests.get_length()
+            {
+                let at dests[d] as size_t
+                let page dests[d + 2] as size_t
+                this.put(out, "\n/")
+                this.put_name(out, dest_names.as_slice().subslice(at, at + (dests[d + 1] as size_t)))
+                this.put(out, " [")
+                this.put_int(out, (first_page + page * 2) as int)
+                this.put(out, " 0 R /XYZ 0 ")
+                this.put_length(out, page_height[page] - dests[d + 3])
+                this.put(out, " null]")
+                d := d + PDF_DEST_REC
+            }
+            this.put(out, "\n>>\nendobj\n")
+        }
+
+        ; the information
+        this.begin_object(info_object)
+        this.put(out, "<<")
+        if title.get_length() > 0
+        {
+            this.put(out, " /Title ")
+            this.put_string(out, title.as_slice())
+        }
+        this.put(out, " /Producer (Scaly pdf) >>\nendobj\n")
+
+        ; the cross-reference table and the trailer
+        let xref out.get_length()
+        this.put(out, "xref\n0 ")
+        this.put_int(out, count as int)
+        this.put(out, "\n0000000000 65535 f \n")
+        var o: size_t 0
+        while o < offsets.get_length()
+        {
+            this.put_padded(out, offsets[o])
+            this.put(out, " 00000 n \n")
+            o := o + 1
+        }
+        this.put(out, "trailer\n<< /Size ")
+        this.put_int(out, count as int)
+        this.put(out, " /Root 1 0 R /Info ")
+        this.put_int(out, info_object as int)
+        this.put(out, " 0 R >>\nstartxref\n")
+        this.put_int(out, xref as int)
+        this.put(out, "\n%%EOF\n")
+        out.as_slice()
+    }
+
+    ; Finish and write the file. False when it cannot be written.
+    procedure write(mutable this, path: String) returns bool
+    {
+        let bytes this.finish()
+        let file fopen(path.to_c_string(), "wb")
+        if file = null
+            return false
+        let written fwrite(bytes.data, 1, bytes.length, file)
+        fclose file
+        written = bytes.length
+    }
+
+    ; An image object: the dictionary, then the data as it came.
+    procedure write_image(mutable this, number: size_t, rec: size_t)
+    {
+        let kind images[rec]
+        let at images[rec + 1] as size_t
+        let length images[rec + 2] as size_t
+        let components images[rec + 5]
+        let bits images[rec + 6]
+        this.begin_object(number)
+        this.put(out, "<< /Type /XObject /Subtype /Image /Width ")
+        this.put_int(out, images[rec + 3])
+        this.put(out, " /Height ")
+        this.put_int(out, images[rec + 4])
+        this.put(out, " /BitsPerComponent ")
+        this.put_int(out, bits)
+        this.put(out, " /ColorSpace ")
+        let palette_length images[rec + 8] as size_t
+        if palette_length > 0
+        {
+            let palette_at images[rec + 7] as size_t
+            this.put(out, "[/Indexed /DeviceRGB ")
+            this.put_int(out, (palette_length / 3) as int - 1)
+            this.put(out, " <")
+            var k: size_t 0
+            while k < palette_length
+            {
+                this.put_hex(out, image_data[palette_at + k])
+                k := k + 1
+            }
+            this.put(out, ">]")
+        }
+        else if components = 1
+            this.put(out, "/DeviceGray")
+        else if components = 3
+            this.put(out, "/DeviceRGB")
+        else
+            ; the four components of a JPEG are written inverted
+            this.put(out, "/DeviceCMYK /Decode [1 0 1 0 1 0 1 0]")
+        let mask_length images[rec + 10] as size_t
+        if mask_length > 0
+        {
+            this.put(out, " /SMask ")
+            this.put_int(out, (number + 1) as int)
+            this.put(out, " 0 R")
+        }
+        if kind = PDF_IMAGE_JPEG
+            this.put(out, " /Filter /DCTDecode")
+        else if kind = PDF_IMAGE_RUNS
+            this.put(out, " /Filter /RunLengthDecode")
+        else
+        {
+            this.put(out, " /Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors ")
+            this.put_int(out, components)
+            this.put(out, " /BitsPerComponent ")
+            this.put_int(out, bits)
+            this.put(out, " /Columns ")
+            this.put_int(out, images[rec + 3])
+            this.put(out, " >>")
+        }
+        this.put(out, " /Length ")
+        this.put_int(out, length as int)
+        this.put(out, " >>\nstream\n")
+        out.add(image_data.as_slice().subslice(at, at + length))
+        this.put(out, "\nendstream\nendobj\n")
+        if mask_length > 0
+        {
+            let mask_at images[rec + 9] as size_t
+            this.begin_object(number + 1)
+            this.put(out, "<< /Type /XObject /Subtype /Image /Width ")
+            this.put_int(out, images[rec + 3])
+            this.put(out, " /Height ")
+            this.put_int(out, images[rec + 4])
+            this.put(out, " /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter /RunLengthDecode /Length ")
+            this.put_int(out, mask_length as int)
+            this.put(out, " >>\nstream\n")
+            out.add(image_data.as_slice().subslice(mask_at, mask_at + mask_length))
+            this.put(out, "\nendstream\nendobj\n")
+        }
+    }
+
+    ; The number of the object image i is, the first image's being `first`.
+    function image_object(this, first: size_t, i: size_t) returns size_t
+    {
+        var number first
+        var k: size_t 0
+        while k < i
+        {
+            number := number + 1
+            if images[k * PDF_IMAGE_REC + 10] > 0
+                number := number + 1
+            k := k + 1
+        }
+        number
+    }
+
+    ; The head of object `number`; the objects are written in their order.
+    procedure begin_object(mutable this, number: size_t)
+    {
+        offsets.add(out.get_length())
+        this.put_int(out, number as int)
+        this.put(out, " 0 obj\n")
+    }
+
+    ; ---- the spelling of values -----------------------------------------------
+
+    procedure put(this, mutable to: ref[Array[u8]], text: Slice[u8])
+    {
+        to.add(text)
+    }
+
+    procedure put_int(this, mutable to: ref[Array[u8]], value: int)
+    {
+        var digits u8[20]
+        var v value
+        if v < 0
+        {
+            to.add(0x2D)
+            v := 0 - v
+        }
+        var at: size_t 20
+        repeat
+        {
+            at := at - 1
+            digits[at] := ((v % 10) as u8) + 0x30
+            v := v / 10
+            if v = 0
+                break
+        }
+        while at < 20
+        {
+            to.add(digits[at])
+            at := at + 1
+        }
+    }
+
+    ; An offset of the cross-reference table: ten digits.
+    procedure put_padded(this, mutable to: ref[Array[u8]], value: size_t)
+    {
+        var digits u8[10]
+        var v value
+        var at: size_t 10
+        while at > 0
+        {
+            at := at - 1
+            digits[at] := ((v % 10) as u8) + 0x30
+            v := v / 10
+        }
+        while at < 10
+        {
+            to.add(digits[at])
+            at := at + 1
+        }
+    }
+
+    ; A length in thousandths of a point, written in points.
+    procedure put_length(this, mutable to: ref[Array[u8]], value: int)
+    {
+        var v value
+        if v < 0
+        {
+            to.add(0x2D)
+            v := 0 - v
+        }
+        this.put_int(to, v / 1000)
+        var rest v % 1000
+        if rest = 0
+            return
+        to.add(0x2E)
+        var unit 100
+        while rest > 0
+        {
+            to.add(((rest / unit) as u8) + 0x30)
+            rest := rest % unit
+            unit := unit / 10
+        }
+    }
+
+    ; The three operands of a color operator, each 0..1.
+    procedure color_operands(this, mutable to: ref[Array[u8]], red: int, green: int, blue: int)
+    {
+        this.put_length(to, red * 1000 / 255)
+        to.add(0x20)
+        this.put_length(to, green * 1000 / 255)
+        to.add(0x20)
+        this.put_length(to, blue * 1000 / 255)
+    }
+
+    ; A literal string: the parentheses and the backslash escaped, what is
+    ; no printing character written as an octal escape.
+    procedure put_string(this, mutable to: ref[Array[u8]], codes: Slice[u8])
+    {
+        to.add(0x28)
+        var i: size_t 0
+        while i < codes.length
+        {
+            let c codes[i]
+            if c = 0x28 or c = 0x29 or c = 0x5C
+            {
+                to.add(0x5C)
+                to.add(c)
+            }
+            else if c < 0x20 or c = 0x7F
+            {
+                to.add(0x5C)
+                to.add(((c >> 6) & 7) + 0x30)
+                to.add(((c >> 3) & 7) + 0x30)
+                to.add((c & 7) + 0x30)
+            }
+            else
+                to.add(c)
+            i := i + 1
+        }
+        to.add(0x29)
+    }
+
+    ; A name: what is no regular character goes as #xx.
+    procedure put_name(this, mutable to: ref[Array[u8]], name: Slice[u8])
+    {
+        var i: size_t 0
+        while i < name.length
+        {
+            let c name[i]
+            let letter (c >= 0x41 and c <= 0x5A) or (c >= 0x61 and c <= 0x7A)
+            let digit c >= 0x30 and c <= 0x39
+            if letter or digit or c = 0x5F or c = 0x2D or c = 0x2E
+                to.add(c)
+            else
+            {
+                to.add(0x23)
+                this.put_hex(to, c)
+            }
+            i := i + 1
+        }
+    }
+
+    procedure put_hex(this, mutable to: ref[Array[u8]], value: u8)
+    {
+        to.add(this.hex_digit(value >> 4))
+        to.add(this.hex_digit(value & 15))
+    }
+
+    function hex_digit(this, value: u8) returns u8
+    {
+        if value < 10
+            return value + 0x30
+        value + 0x37
+    }
+}

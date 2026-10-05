@@ -1,0 +1,426 @@
+; Inflate -- decoding a DEFLATE stream (RFC 1951), and the run-length coding
+; a PDF reader undoes with its RunLengthDecode filter.
+;
+; The document needs the first for one case only: a PNG with an alpha channel
+; cannot go into a PDF as it is, because there the transparency is an image
+; of its own. So its rows are decoded here, taken apart, and written again
+; run-length coded -- which is all the compression this package brings, and
+; serves the drawings such images usually are.
+;
+; The decoder reads its codes bit by bit against the counts of codes per
+; length (the canonical Huffman code as the RFC describes it), with no
+; lookup tables: it is short, and fast enough for what it is used for.
+
+; the lengths and distances of RFC 1951, 3.2.5
+define PDF_LENGTH_BASE: int[] [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258]
+define PDF_LENGTH_EXTRA: int[] [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0]
+define PDF_DISTANCE_BASE: int[] [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577]
+define PDF_DISTANCE_EXTRA: int[] [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13]
+; the order the lengths of the code length code come in
+define PDF_CODE_ORDER: int[] [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+
+define PdfInflate
+(
+    ; where the next byte is read, and the bits read but not yet used
+    var at: size_t
+    var bit_buffer: int
+    var bit_count: int
+    var failed: bool
+    ; the two codes of a block, each as the number of codes per length and
+    ; the symbols in the order of their codes: literals/lengths, distances
+    var length_counts: Array[int]
+    var length_symbols: Array[int]
+    var distance_counts: Array[int]
+    var distance_symbols: Array[int]
+    ; the code lengths a code is built from, and the work space of that
+    var lengths: Array[int]
+    var offsets: Array[int]
+    ; the code lengths of a block's two codes while they are being read
+    var kept: Array[int]
+)
+{
+    init()
+    {
+        at := 0
+        bit_buffer := 0
+        bit_count := 0
+        failed := false
+        length_counts := Array[int]^this()
+        length_symbols := Array[int]^this()
+        distance_counts := Array[int]^this()
+        distance_symbols := Array[int]^this()
+        lengths := Array[int]^this()
+        offsets := Array[int]^this()
+        kept := Array[int]^this()
+        var i 0
+        while i < 320
+        {
+            if i < 16
+            {
+                length_counts.add(0)
+                distance_counts.add(0)
+                offsets.add(0)
+            }
+            if i < 288
+                length_symbols.add(0)
+            if i < 32
+                distance_symbols.add(0)
+            lengths.add(0)
+            i := i + 1
+        }
+    }
+
+    ; Decode `data`, a DEFLATE stream, appending what it holds to `out`.
+    ; False when the stream is damaged or ends early.
+    procedure run(mutable this, data: Slice[u8], mutable out: ref[Array[u8]]) returns bool
+    {
+        at := 0
+        bit_buffer := 0
+        bit_count := 0
+        failed := false
+        repeat
+        {
+            let last this.bits(data, 1)
+            let kind this.bits(data, 2)
+            if kind = 0
+                this.stored(data, out)
+            else if kind = 1
+            {
+                this.fixed_codes()
+                this.block(data, out)
+            }
+            else if kind = 2
+            {
+                this.dynamic_codes(data)
+                if failed = false
+                    this.block(data, out)
+            }
+            else
+                failed := true
+            if failed or last = 1
+                break
+        }
+        failed = false
+    }
+
+    ; The next n bits, the first read the lowest.
+    procedure bits(mutable this, data: Slice[u8], n: int) returns int
+    {
+        while bit_count < n
+        {
+            if at >= data.length
+            {
+                failed := true
+                return 0
+            }
+            bit_buffer := bit_buffer | ((data[at] as int) << bit_count)
+            at := at + 1
+            bit_count := bit_count + 8
+        }
+        let value bit_buffer & ((1 << n) - 1)
+        bit_buffer := bit_buffer >> n
+        bit_count := bit_count - n
+        value
+    }
+
+    ; A block that is not compressed: its length, then its bytes.
+    procedure stored(mutable this, data: Slice[u8], mutable out: ref[Array[u8]])
+    {
+        bit_buffer := 0
+        bit_count := 0
+        if at + 4 > data.length
+        {
+            failed := true
+            return
+        }
+        let length (data[at] as size_t) | ((data[at + 1] as size_t) << 8)
+        at := at + 4
+        if at + length > data.length
+        {
+            failed := true
+            return
+        }
+        out.add(data.subslice(at, at + length))
+        at := at + length
+    }
+
+    ; Build a code from the first n of `lengths`: the distance code, or the
+    ; literal/length code.
+    procedure build(mutable this, n: int, distance: bool)
+    {
+        var i 0
+        while i < 16
+        {
+            offsets.put(i as size_t, 0)
+            i := i + 1
+        }
+        i := 0
+        while i < n
+        {
+            let l lengths[i as size_t] as size_t
+            offsets.put(l, offsets[l] + 1)
+            i := i + 1
+        }
+        ; the counts, then where the symbols of each length begin
+        var begin 0
+        i := 0
+        while i < 16
+        {
+            let count offsets[i as size_t]
+            if distance
+                distance_counts.put(i as size_t, count)
+            else
+                length_counts.put(i as size_t, count)
+            offsets.put(i as size_t, begin)
+            if i > 0
+                begin := begin + count
+            i := i + 1
+        }
+        i := 0
+        while i < n
+        {
+            let l lengths[i as size_t] as size_t
+            if l <> 0
+            {
+                let slot offsets[l] as size_t
+                if distance
+                {
+                    if slot < 32
+                        distance_symbols.put(slot, i)
+                }
+                else if slot < 288
+                    length_symbols.put(slot, i)
+                offsets.put(l, offsets[l] + 1)
+            }
+            i := i + 1
+        }
+    }
+
+    ; The next symbol of one of the two codes.
+    procedure symbol(mutable this, data: Slice[u8], distance: bool) returns int
+    {
+        var code 0
+        var first 0
+        var index 0
+        var length 1
+        while length < 16
+        {
+            code := code | this.bits(data, 1)
+            if failed
+                return 0
+            var count 0
+            if distance
+                count := distance_counts[length as size_t]
+            else
+                count := length_counts[length as size_t]
+            if code - count < first
+            {
+                if distance
+                    return distance_symbols[(index + code - first) as size_t]
+                return length_symbols[(index + code - first) as size_t]
+            }
+            index := index + count
+            first := (first + count) << 1
+            code := code << 1
+            length := length + 1
+        }
+        failed := true
+        0
+    }
+
+    ; The codes every decoder knows.
+    procedure fixed_codes(mutable this)
+    {
+        var i 0
+        while i < 288
+        {
+            var l 8
+            if i >= 144 and i < 256
+                l := 9
+            else if i >= 256 and i < 280
+                l := 7
+            lengths.put(i as size_t, l)
+            i := i + 1
+        }
+        this.build(288, false)
+        i := 0
+        while i < 30
+        {
+            lengths.put(i as size_t, 5)
+            i := i + 1
+        }
+        this.build(30, true)
+    }
+
+    ; The codes a block brings along, themselves coded.
+    procedure dynamic_codes(mutable this, data: Slice[u8])
+    {
+        let literals this.bits(data, 5) + 257
+        let distances this.bits(data, 5) + 1
+        let coded this.bits(data, 4) + 4
+        if failed or literals > 286 or distances > 30
+        {
+            failed := true
+            return
+        }
+        var i 0
+        while i < 19
+        {
+            lengths.put(i as size_t, 0)
+            i := i + 1
+        }
+        i := 0
+        while i < coded
+        {
+            lengths.put(PDF_CODE_ORDER[i as size_t] as size_t, this.bits(data, 3))
+            i := i + 1
+        }
+        this.build(19, false)
+        ; the lengths of both codes in one run, with the repeats written out
+        i := 0
+        while i < literals + distances
+        {
+            let s this.symbol(data, false)
+            if failed
+                return
+            if s < 16
+            {
+                this.keep_length(i, s)
+                i := i + 1
+            }
+            else
+            {
+                var value 0
+                var times 0
+                if s = 16
+                {
+                    if i = 0
+                    {
+                        failed := true
+                        return
+                    }
+                    value := this.kept_length(i - 1)
+                    times := this.bits(data, 2) + 3
+                }
+                else if s = 17
+                    times := this.bits(data, 3) + 3
+                else
+                    times := this.bits(data, 7) + 11
+                if i + times > literals + distances
+                {
+                    failed := true
+                    return
+                }
+                while times > 0
+                {
+                    this.keep_length(i, value)
+                    i := i + 1
+                    times := times - 1
+                }
+            }
+        }
+        ; first the distance code, from the lengths behind the literals'
+        i := 0
+        while i < distances
+        {
+            lengths.put(i as size_t, this.kept_length(literals + i))
+            i := i + 1
+        }
+        this.build(distances, true)
+        i := 0
+        while i < literals
+        {
+            lengths.put(i as size_t, this.kept_length(i))
+            i := i + 1
+        }
+        this.build(literals, false)
+    }
+
+    ; The lengths read for the two codes wait apart: the code they are read
+    ; with is in use meanwhile.
+    procedure keep_length(mutable this, i: int, value: int)
+    {
+        while (kept.get_length() as int) <= i
+            kept.add(0)
+        kept.put(i as size_t, value)
+    }
+
+    function kept_length(this, i: int) returns int
+        kept[i as size_t]
+
+    ; The data of a block: literals, and lengths with their distances.
+    procedure block(mutable this, data: Slice[u8], mutable out: ref[Array[u8]])
+    {
+        repeat
+        {
+            let s this.symbol(data, false)
+            if failed
+                return
+            if s < 256
+                out.add(s as u8)
+            else if s = 256
+                return
+            else
+            {
+                let li (s - 257) as size_t
+                if li >= 29
+                {
+                    failed := true
+                    return
+                }
+                var length PDF_LENGTH_BASE[li] + this.bits(data, PDF_LENGTH_EXTRA[li])
+                let d this.symbol(data, true) as size_t
+                if failed or d >= 30
+                {
+                    failed := true
+                    return
+                }
+                let distance (PDF_DISTANCE_BASE[d] + this.bits(data, PDF_DISTANCE_EXTRA[d])) as size_t
+                if failed or distance > out.get_length()
+                {
+                    failed := true
+                    return
+                }
+                while length > 0
+                {
+                    out.add(out[out.get_length() - distance])
+                    length := length - 1
+                }
+            }
+        }
+    }
+
+    ; Append `data` run-length coded as a PDF's RunLengthDecode filter reads
+    ; it: a count below 128 is followed by that many bytes plus one, a count
+    ; above it by one byte to repeat 257 minus the count times, 128 ends.
+    procedure run_lengths(data: Slice[u8], mutable out: ref[Array[u8]])
+    {
+        var i: size_t 0
+        while i < data.length
+        {
+            ; a run of equal bytes
+            var run: size_t 1
+            while i + run < data.length and run < 128 and data[i + run] = data[i]
+                run := run + 1
+            if run >= 2
+            {
+                out.add((257 - run) as u8)
+                out.add(data[i])
+                i := i + run
+                continue
+            }
+            ; else the bytes up to the next run of three
+            var end i + 1
+            while end < data.length and end - i < 128
+            {
+                if end + 2 < data.length and data[end] = data[end + 1] and data[end] = data[end + 2]
+                    break
+                end := end + 1
+            }
+            out.add((end - i - 1) as u8)
+            out.add(data.subslice(i, end))
+            i := end
+        }
+        out.add(128)
+    }
+}

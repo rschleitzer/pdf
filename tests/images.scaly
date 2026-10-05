@@ -1,0 +1,53 @@
+; Images: a JPEG and a PNG without alpha go in as their files hold them, a
+; PNG with an alpha channel is decoded and gets a soft mask, an interlaced
+; PNG and what is no image are refused.
+;   numbers  what add_jpeg/add_png answer for photo.jpg, rgb.png, gray.png,
+;            palette.png, alpha.png, interlaced.png and a text
+;   size     the pixels of alpha.png, and what probe reads from photo.jpg
+;   bytes    the length of the file and the sum of its bytes
+; Expected: numbers 0 1 2 3 4 -1 -1 size 40 20 40 20 bytes 6623 31284
+
+package scaly 0.1.0
+package pdf 0.1.0
+
+use pdf.Document.PdfDocument
+
+procedure read(name: String) returns String
+    File.read_to_string("tests/data/`name`")
+
+procedure main(argc: int, argv: pointer[pointer[const_char]]) returns int
+{
+    var doc PdfDocument()
+    let photo read(String("photo.jpg"))
+    let a doc.add_jpeg(photo.as_slice())
+    let b doc.add_png(read(String("rgb.png")).as_slice())
+    let c doc.add_png(read(String("gray.png")).as_slice())
+    let d doc.add_png(read(String("palette.png")).as_slice())
+    let e doc.add_png(read(String("alpha.png")).as_slice())
+    let f doc.add_png(read(String("interlaced.png")).as_slice())
+    let g doc.add_png("not an image, though long enough to have a header")
+    var width 0
+    var height 0
+    let known PdfDocument.probe(photo.as_slice(), &width, &height)
+    doc.begin_page(300000, 200000)
+    doc.fill_rectangle(0, 0, 300000, 200000, 250, 240, 200)
+    doc.image(a, 10000, 10000, 80000, 40000)
+    doc.image(b, 100000, 10000, 80000, 40000)
+    doc.image(c, 190000, 10000, 80000, 40000)
+    doc.image(d, 10000, 60000, 80000, 40000)
+    doc.image(e, 100000, 60000, 80000, 40000)
+    doc.end_page()
+    let bytes doc.finish()
+    var sum 0
+    var i: size_t 0
+    while i < bytes.length
+    {
+        sum := (sum + (bytes[i] as int)) % 65521
+        i := i + 1
+    }
+    print "numbers `a` `b` `c` `d` `e` `f` `g` size `doc.image_width(e)` `doc.image_height(e)` `width` `height` bytes `bytes.length` `sum`\n"
+    ; given a name, the file is kept to be looked at
+    if argc > 1
+        doc.write(String(*(argv + 1)))
+    0
+}
