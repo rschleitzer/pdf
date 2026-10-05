@@ -1,9 +1,12 @@
 ; Font -- the standard fonts every PDF reader brings along, so that a document
 ; names them and embeds nothing: Helvetica, Times and Courier, each upright
 ; and italic, medium and bold. A font is its id, family + PDF_BOLD +
-; PDF_ITALIC. Text is WinAnsiEncoding (Windows code page 1252): `encode`
-; answers the code of a character, `width` the advance of a code in
-; thousandths of the font size.
+; PDF_ITALIC. They have the characters of WinAnsiEncoding (Windows code page
+; 1252) and no others: `encode` answers the code of a character, `width` the
+; advance of a code in thousandths of the font size.
+;
+; Text is UTF-8 wherever this package takes any; `decode` reads it character
+; by character.
 
 define PDF_HELVETICA: int 0
 define PDF_TIMES: int 4
@@ -66,17 +69,91 @@ define PdfFont (id: int)
         PDF_METRICS[(font as size_t) * PDF_METRICS_ROW + ((code as size_t) - 32)]
     }
 
-    ; The width of a run at a font size, in the unit of the size.
+    ; The width of a run of text at a font size, in the unit of the size.
+    ; A character the fonts do not have is as wide as the `?` set for it.
     function text_width(font: int, size: int, text: Slice[u8]) returns int
     {
         var sum 0
         var i: size_t 0
         while i < text.length
         {
-            sum := sum + PdfFont.width(font, text[i])
-            i := i + 1
+            let ch PdfFont.decode(text, i)
+            i := i + PdfFont.decoded(text, i)
+            var code PdfFont.encode(ch)
+            if code = 0
+                code := 0x3F
+            sum := sum + PdfFont.width(font, code)
         }
         sum * size / 1000
+    }
+
+    ; The character that begins at text[at]; U+FFFD for bytes that are no
+    ; UTF-8.
+    function decode(text: Slice[u8], at: size_t) returns u32
+    {
+        let b text[at] as u32
+        if b < 0x80
+            return b
+        let n PdfFont.decoded(text, at)
+        if n = 1
+            return 0xFFFD
+        var ch b & ((0x7F as u32) >> (n as u32))
+        var k: size_t 1
+        while k < n
+        {
+            ch := (ch << 6) | ((text[at + k] as u32) & 0x3F)
+            k := k + 1
+        }
+        ch
+    }
+
+    ; How many bytes the character at text[at] takes: 1 for a byte that
+    ; begins none.
+    function decoded(text: Slice[u8], at: size_t) returns size_t
+    {
+        let b text[at]
+        var n: size_t 1
+        if b >= 0xF0 and b < 0xF8
+            n := 4
+        else if b >= 0xE0
+            n := 3
+        else if b >= 0xC0
+            n := 2
+        if b >= 0xF8 or at + n > text.length
+            return 1
+        var k: size_t 1
+        while k < n
+        {
+            if (text[at + k] & 0xC0) <> 0x80
+                return 1
+            k := k + 1
+        }
+        n
+    }
+
+    ; Append a character to a buffer as UTF-8.
+    procedure append(mutable to: ref[Array[u8]], ch: u32)
+    {
+        if ch < 0x80
+            to.add(ch as u8)
+        else if ch < 0x800
+        {
+            to.add((0xC0 | (ch >> 6)) as u8)
+            to.add((0x80 | (ch & 0x3F)) as u8)
+        }
+        else if ch < 0x10000
+        {
+            to.add((0xE0 | (ch >> 12)) as u8)
+            to.add((0x80 | ((ch >> 6) & 0x3F)) as u8)
+            to.add((0x80 | (ch & 0x3F)) as u8)
+        }
+        else
+        {
+            to.add((0xF0 | (ch >> 18)) as u8)
+            to.add((0x80 | ((ch >> 12) & 0x3F)) as u8)
+            to.add((0x80 | ((ch >> 6) & 0x3F)) as u8)
+            to.add((0x80 | (ch & 0x3F)) as u8)
+        }
     }
 
     ; How far the font rises above and falls below the baseline, in

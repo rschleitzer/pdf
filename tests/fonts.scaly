@@ -1,0 +1,89 @@
+; Fonts given to a document: found by family and style among the files of a
+; directory, measured, and embedded with the glyphs the text uses.
+;   files    the font files found in tests/data, and whether the regular and
+;            the bold font of the family are among them and a third is not
+;   numbers  what add_font answers for the two, and for bytes that are no font
+;   widths   a run in the regular font (map of format 12), the same in the
+;            bold one (format 4), a character beyond the basic plane, a
+;            composed glyph, and a run in a standard font with a character it
+;            lacks
+;   has      which font has which character
+;   bytes    the length of the file and the sum of its bytes -- after the
+;            pages were set, forgotten and set again
+; Expected: files 2 1 1 0 numbers 12 13 -1 widths 9940 13540 4440 4370 8880 has 1 0 1 0 bytes 6588 34862
+
+package scaly 0.1.0
+package pdf 0.1.0
+
+use pdf.Font.PdfFont
+use pdf.FontFiles.PdfFontFiles
+use pdf.Document.PdfDocument
+
+procedure pages(mutable doc: ref[PdfDocument], regular: int, bold: int)
+{
+    doc.begin_page(400000, 200000)
+    doc.text(regular, 20000, 20000, 50000, "Abc é Ω Ж € 中 😀")
+    doc.text(bold, 20000, 20000, 90000, "Bold Ω, (a-z): 0.9")
+    doc.text(regular, 12000, 20000, 120000, "x")
+    doc.text(PdfFont.select("Times", false, true), 14000, 20000, 150000, "Standard: é — Ω")
+    doc.end_page()
+}
+
+procedure main(argc: int, argv: pointer[pointer[const_char]]) returns int
+{
+    var files PdfFontFiles()
+    files.scan(String("tests/data"), 0)
+    let regular_path files.find("tiny", false, false)
+    let bold_path files.find("TINY", true, false)
+    let italic_path files.find("Tiny", false, true)
+
+    var doc PdfDocument()
+    let regular doc.add_font(File.read_to_string(regular_path).as_slice())
+    let bold doc.add_font(File.read_to_string(bold_path).as_slice())
+    let none doc.add_font("no font at all, only some text that is long enough")
+
+    let w1 doc.text_width(regular, 10000, "Abc")
+    let w2 doc.text_width(bold, 10000, "Abc")
+    let w3 doc.text_width(regular, 10000, "😀")
+    let w4 doc.text_width(regular, 10000, "é")
+    let w5 doc.text_width(4, 10000, "aΩ")
+
+    doc.set_title("Tiny: Ω")
+    pages(&doc, regular, bold)
+    doc.clear()
+    pages(&doc, regular, bold)
+    let bytes doc.finish()
+    var sum 0
+    var i: size_t 0
+    while i < bytes.length
+    {
+        sum := (sum + (bytes[i] as int)) % 65521
+        i := i + 1
+    }
+    var found 0
+    if regular_path.get_length() > 0
+        found := 1
+    var found_bold 0
+    if bold_path.get_length() > 0
+        found_bold := 1
+    var found_italic 0
+    if italic_path.get_length() > 0
+        found_italic := 1
+    var h1 0
+    if doc.has_character(regular, 0x1F600)
+        h1 := 1
+    var h2 0
+    if doc.has_character(bold, 0x1F600)
+        h2 := 1
+    var h3 0
+    if doc.has_character(0, 0xE9)
+        h3 := 1
+    var h4 0
+    if doc.has_character(0, 0x3A9)
+        h4 := 1
+    print "files `files.count()` `found` `found_bold` `found_italic` numbers `regular` `bold` `none` widths `w1` `w2` `w3` `w4` `w5` has `h1` `h2` `h3` `h4` bytes `bytes.length` `sum`\n"
+    ; given a name, the file is kept to be looked at
+    if argc > 1
+        doc.write(String(*(argv + 1)))
+    0
+}

@@ -4,9 +4,11 @@
 ; it, and at the end takes the bytes of the file. Lengths are integers in
 ; THOUSANDTHS OF A POINT (the DSSSL length unit at 72000 units per inch), and
 ; a position is measured from the TOP LEFT corner of the page, y downwards --
-; the writer turns it into the PDF's own bottom-left coordinates. Text is a
-; run of WinAnsiEncoding codes in one of the standard fonts (pdf/Font.scaly),
-; placed at its baseline.
+; the writer turns it into the PDF's own bottom-left coordinates. Text is
+; UTF-8, placed at its baseline, in one of the standard fonts (pdf/Font.scaly)
+; or in a TrueType font the document was given (`add_font`). A standard font
+; has the characters of Windows code page 1252 and prints `?` for any other;
+; a font that was given is embedded, with the glyphs the document uses.
 ;
 ; The file is PDF 1.4 with uncompressed content streams and nothing that
 ; depends on the day or the machine: the same calls write the same bytes.
@@ -17,6 +19,7 @@
 
 use pdf.Font.PdfFont
 use pdf.Inflate.PdfInflate
+use pdf.TrueType.PdfTrueType
 
 ; the stride of the flat records
 define PDF_IMAGE_REC: size_t 11
@@ -26,6 +29,9 @@ define PDF_LABEL_REC: size_t 3
 ; what an image's data is
 define PDF_IMAGE_JPEG: int 0
 define PDF_IMAGE_PNG: int 1
+; what the document keeps of a font it was given, beside the font's record:
+; where its glyphs' bits are, whether a page names it, its first object
+define PDF_FONT_REC: size_t 3
 ; rows decoded and run-length coded again (a PNG with an alpha channel)
 define PDF_IMAGE_RUNS: int 2
 
@@ -50,6 +56,20 @@ define PdfDocument
     ; page labels: first page, style (a character of D r R a A), first number
     var labels: Array[int]
     var title: Array[u8]
+    ; the fonts given: their files one after the other, a record each
+    ; (pdf/TrueType.scaly), their PostScript names, and what the document
+    ; itself keeps of each
+    var font_data: Array[u8]
+    var font_records: Array[int]
+    var font_names: Array[u8]
+    var font_state: Array[int]
+    ; one bit per glyph of every font given: the document uses it
+    var glyphs_used: Array[u8]
+    ; the glyphs used with the character each stands for: font, glyph,
+    ; character
+    var glyph_characters: Array[int]
+    ; a font being written
+    var scratch: Array[u8]
     ; the state of the page being written
     var open: bool
     var cur_height: int
@@ -72,6 +92,13 @@ define PdfDocument
         dest_names := Array[u8]^this()
         labels := Array[int]^this()
         title := Array[u8]^this()
+        font_data := Array[u8]^this()
+        font_records := Array[int]^this()
+        font_names := Array[u8]^this()
+        font_state := Array[int]^this()
+        glyphs_used := Array[u8]^this()
+        glyph_characters := Array[int]^this()
+        scratch := Array[u8]^this()
         open := false
         cur_height := 0
         cur_color := 0 - 1
@@ -99,7 +126,40 @@ define PdfDocument
     function page_count(this) returns int
         page_start.get_length() as int
 
-    ; The title in the document information (WinAnsiEncoding codes).
+    ; Forget the pages, images, destinations and labels, and which glyphs
+    ; were used; the fonts given stay. For a caller that sets its pages
+    ; twice, the first time to see where things come to stand.
+    procedure clear(mutable this)
+    {
+        content.clear()
+        page_start.clear()
+        page_width.clear()
+        page_height.clear()
+        fonts_used := 0
+        images.clear()
+        image_data.clear()
+        dests.clear()
+        dest_names.clear()
+        labels.clear()
+        glyph_characters.clear()
+        var i: size_t 0
+        while i < glyphs_used.get_length()
+        {
+            glyphs_used.put(i, 0)
+            i := i + 1
+        }
+        i := 0
+        while i < font_state.get_length()
+        {
+            font_state.put(i + 1, 0)
+            i := i + PDF_FONT_REC
+        }
+        open := false
+        out.clear()
+        offsets.clear()
+    }
+
+    ; The title in the document information.
     procedure set_title(mutable this, text: Slice[u8])
     {
         title.clear()
@@ -121,12 +181,70 @@ define PdfDocument
         this.put(content, " RG\n")
     }
 
-    ; A run of text with its baseline at y, beginning at x.
-    procedure text(mutable this, font: int, size: int, x: int, y: int, codes: Slice[u8])
+    ; ---- fonts ----------------------------------------------------------------
+
+    ; Take a TrueType font file. Answers the font's number, to be used where
+    ; a standard font's id is, or -1 when the bytes are no TrueType font
+    ; with TrueType outlines.
+    procedure add_font(mutable this, data: Slice[u8]) returns int
     {
-        if codes.length = 0
+        let at font_data.get_length()
+        font_data.add(data)
+        if PdfTrueType.parse(font_data.as_slice(), at, &font_records, &font_names) = false
+            return 0 - 1
+        let r font_records.get_length() - PTT_SIZE
+        font_state.add(glyphs_used.get_length() as int)
+        font_state.add(0)
+        font_state.add(0)
+        var bytes (font_records[r + PTT_GLYPHS] + 7) / 8
+        while bytes > 0
+        {
+            glyphs_used.add(0)
+            bytes := bytes - 1
+        }
+        PDF_FONT_COUNT + (((r / PTT_SIZE) as int))
+    }
+
+    ; The width of a run of text in a font at a size, in the unit of the
+    ; size.
+    function text_width(this, font: int, size: int, text: Slice[u8]) returns int
+    {
+        if font < PDF_FONT_COUNT
+            return PdfFont.text_width(font, size, text)
+        let r ((font - PDF_FONT_COUNT) as size_t) * PTT_SIZE
+        if r >= font_records.get_length()
+            return 0
+        let data font_data.as_slice()
+        var sum 0
+        var i: size_t 0
+        while i < text.length
+        {
+            let ch PdfFont.decode(text, i)
+            i := i + PdfFont.decoded(text, i)
+            sum := sum + PdfTrueType.advance(data, &font_records, r, PdfTrueType.glyph(data, &font_records, r, ch))
+        }
+        sum * size / font_records[r + PTT_UNITS]
+    }
+
+    ; True when the font has a glyph for the character.
+    function has_character(this, font: int, ch: u32) returns bool
+    {
+        if font < PDF_FONT_COUNT
+            return PdfFont.encode(ch) <> 0
+        let r ((font - PDF_FONT_COUNT) as size_t) * PTT_SIZE
+        if r >= font_records.get_length()
+            return false
+        PdfTrueType.glyph(font_data.as_slice(), &font_records, r, ch) <> 0
+    }
+
+    ; A run of text with its baseline at y, beginning at x.
+    procedure text(mutable this, font: int, size: int, x: int, y: int, text: Slice[u8])
+    {
+        if text.length = 0
             return
-        fonts_used := fonts_used | (1 << font)
+        let r ((font - PDF_FONT_COUNT) as size_t) * PTT_SIZE
+        if font >= PDF_FONT_COUNT and r >= font_records.get_length()
+            return
         this.put(content, "BT /F")
         this.put_int(content, font + 1)
         content.add(0x20)
@@ -136,7 +254,51 @@ define PdfDocument
         content.add(0x20)
         this.put_length(content, cur_height - y)
         this.put(content, " Td ")
-        this.put_string(content, codes)
+        if font < PDF_FONT_COUNT
+        {
+            ; a standard font: the codes of its encoding
+            fonts_used := fonts_used | (1 << font)
+            scratch.clear()
+            var i: size_t 0
+            while i < text.length
+            {
+                let ch PdfFont.decode(text, i)
+                i := i + PdfFont.decoded(text, i)
+                var code PdfFont.encode(ch)
+                if code = 0
+                    code := 0x3F
+                scratch.add(code)
+            }
+            this.put_string(content, scratch.as_slice())
+        }
+        else
+        {
+            ; a font given: the numbers of its glyphs, two bytes each
+            let state ((font - PDF_FONT_COUNT) as size_t) * PDF_FONT_REC
+            font_state.put(state + 1, 1)
+            let used_at font_state[state] as size_t
+            let data font_data.as_slice()
+            content.add(0x3C)
+            var i: size_t 0
+            while i < text.length
+            {
+                let ch PdfFont.decode(text, i)
+                i := i + PdfFont.decoded(text, i)
+                let glyph PdfTrueType.glyph(data, &font_records, r, ch)
+                let cell used_at + ((glyph / 8) as size_t)
+                let bit (1 << (glyph % 8)) as u8
+                if (glyphs_used[cell] & bit) = 0
+                {
+                    glyphs_used.put(cell, glyphs_used[cell] | bit)
+                    glyph_characters.add(font)
+                    glyph_characters.add(glyph)
+                    glyph_characters.add(ch as int)
+                }
+                this.put_hex(content, ((glyph >> 8) & 255) as u8)
+                this.put_hex(content, (glyph & 255) as u8)
+            }
+            content.add(0x3E)
+        }
         this.put(content, " Tj ET\n")
     }
 
@@ -551,6 +713,19 @@ define PdfDocument
             }
             f := f + 1
         }
+        ; a font given takes five objects: the font, its descendant, its
+        ; descriptor, its file and its character map
+        var e: size_t 0
+        while e < font_state.get_length()
+        {
+            font_state.put(e + 2, 0)
+            if font_state[e + 1] <> 0
+            {
+                font_state.put(e + 2, next as int)
+                next := next + 5
+            }
+            e := e + PDF_FONT_REC
+        }
         let first_image next
         var i: size_t 0
         while i < n_images
@@ -634,6 +809,13 @@ define PdfDocument
             }
             f := f + 1
         }
+        e := 0
+        while e < font_state.get_length()
+        {
+            if font_state[e + 2] <> 0
+                this.write_font(e / PDF_FONT_REC)
+            e := e + PDF_FONT_REC
+        }
 
         ; the images, each followed by its soft mask if it has one
         i := 0
@@ -657,7 +839,7 @@ define PdfDocument
             out.add(0x20)
             this.put_length(out, page_height[p])
             this.put(out, "] /Resources << /ProcSet [/PDF /Text /ImageB /ImageC /ImageI]")
-            if fonts_used <> 0
+            if fonts_used <> 0 or font_state.get_length() > 0
             {
                 this.put(out, " /Font <<")
                 f := 0
@@ -672,6 +854,19 @@ define PdfDocument
                         this.put(out, " 0 R")
                     }
                     f := f + 1
+                }
+                e := 0
+                while e < font_state.get_length()
+                {
+                    if font_state[e + 2] <> 0
+                    {
+                        this.put(out, " /F")
+                        this.put_int(out, PDF_FONT_COUNT + ((e / PDF_FONT_REC) as int) + 1)
+                        out.add(0x20)
+                        this.put_int(out, font_state[e + 2])
+                        this.put(out, " 0 R")
+                    }
+                    e := e + PDF_FONT_REC
                 }
                 this.put(out, " >>")
             }
@@ -731,7 +926,7 @@ define PdfDocument
         if title.get_length() > 0
         {
             this.put(out, " /Title ")
-            this.put_string(out, title.as_slice())
+            this.put_text(out, title.as_slice())
         }
         this.put(out, " /Producer (Scaly pdf) >>\nendobj\n")
 
@@ -767,6 +962,207 @@ define PdfDocument
         let written fwrite(bytes.data, 1, bytes.length, file)
         fclose file
         written = bytes.length
+    }
+
+    ; The five objects of font `index` of the fonts given: a composite font
+    ; whose codes are the glyph numbers, its descendant with the widths of
+    ; the glyphs used, the descriptor, the font file with only those glyphs,
+    ; and the map from the codes back to characters, which is what lets a
+    ; reader search and copy the text.
+    procedure write_font(mutable this, index: size_t)
+    {
+        let r index * PTT_SIZE
+        let state index * PDF_FONT_REC
+        let font PDF_FONT_COUNT + (index as int)
+        let object font_state[state + 2] as size_t
+        let units font_records[r + PTT_UNITS]
+        PdfTrueType.subset(font_data.as_slice(), &font_records, r, &glyphs_used, font_state[state] as size_t, &scratch)
+
+        this.begin_object(object)
+        this.put(out, "<< /Type /Font /Subtype /Type0 /BaseFont /")
+        this.put_font_name(index)
+        this.put(out, " /Encoding /Identity-H /DescendantFonts [")
+        this.put_int(out, (object + 1) as int)
+        this.put(out, " 0 R] /ToUnicode ")
+        this.put_int(out, (object + 4) as int)
+        this.put(out, " 0 R >>\nendobj\n")
+
+        this.begin_object(object + 1)
+        this.put(out, "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /")
+        this.put_font_name(index)
+        this.put(out, " /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor ")
+        this.put_int(out, (object + 2) as int)
+        this.put(out, " 0 R /CIDToGIDMap /Identity /DW 1000 /W [")
+        var i: size_t 0
+        while i < glyph_characters.get_length()
+        {
+            if glyph_characters[i] = font
+            {
+                let glyph glyph_characters[i + 1]
+                out.add(0x20)
+                this.put_int(out, glyph)
+                this.put(out, " [")
+                this.put_int(out, PdfTrueType.advance(font_data.as_slice(), &font_records, r, glyph) * 1000 / units)
+                this.put(out, "]")
+            }
+            i := i + 3
+        }
+        this.put(out, " ] >>\nendobj\n")
+
+        this.begin_object(object + 2)
+        this.put(out, "<< /Type /FontDescriptor /FontName /")
+        this.put_font_name(index)
+        var flags 4
+        if font_records[r + PTT_ITALIC] <> 0
+            flags := flags | 64
+        this.put(out, " /Flags ")
+        this.put_int(out, flags)
+        this.put(out, " /FontBBox [")
+        this.put_int(out, font_records[r + PTT_BOX] * 1000 / units)
+        out.add(0x20)
+        this.put_int(out, font_records[r + PTT_BOX + 1] * 1000 / units)
+        out.add(0x20)
+        this.put_int(out, font_records[r + PTT_BOX + 2] * 1000 / units)
+        out.add(0x20)
+        this.put_int(out, font_records[r + PTT_BOX + 3] * 1000 / units)
+        this.put(out, "] /ItalicAngle ")
+        this.put_int(out, font_records[r + PTT_ITALIC])
+        this.put(out, " /Ascent ")
+        this.put_int(out, font_records[r + PTT_ASCENDER] * 1000 / units)
+        this.put(out, " /Descent ")
+        this.put_int(out, font_records[r + PTT_DESCENDER] * 1000 / units)
+        this.put(out, " /CapHeight ")
+        this.put_int(out, font_records[r + PTT_ASCENDER] * 1000 / units)
+        this.put(out, " /StemV 80 /FontFile2 ")
+        this.put_int(out, (object + 3) as int)
+        this.put(out, " 0 R >>\nendobj\n")
+
+        this.begin_object(object + 3)
+        this.put(out, "<< /Length ")
+        this.put_int(out, scratch.get_length() as int)
+        this.put(out, " /Length1 ")
+        this.put_int(out, scratch.get_length() as int)
+        this.put(out, " >>\nstream\n")
+        out.add(scratch.as_slice())
+        this.put(out, "\nendstream\nendobj\n")
+
+        ; the character map, a hundred codes to a block
+        scratch.clear()
+        this.put(scratch, "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n")
+        var count 0
+        i := 0
+        while i < glyph_characters.get_length()
+        {
+            if glyph_characters[i] = font
+                count := count + 1
+            i := i + 3
+        }
+        var in_block 0
+        i := 0
+        while i < glyph_characters.get_length()
+        {
+            if glyph_characters[i] = font
+            {
+                if in_block = 0
+                {
+                    var block count
+                    if block > 100
+                        block := 100
+                    this.put_int(scratch, block)
+                    this.put(scratch, " beginbfchar\n")
+                }
+                let glyph glyph_characters[i + 1]
+                let ch glyph_characters[i + 2]
+                scratch.add(0x3C)
+                this.put_hex(scratch, ((glyph >> 8) & 255) as u8)
+                this.put_hex(scratch, (glyph & 255) as u8)
+                this.put(scratch, "> <")
+                this.put_utf16(scratch, ch)
+                this.put(scratch, ">\n")
+                in_block := in_block + 1
+                count := count - 1
+                if in_block = 100 or count = 0
+                {
+                    this.put(scratch, "endbfchar\n")
+                    in_block := 0
+                }
+            }
+            i := i + 3
+        }
+        this.put(scratch, "endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n")
+        this.begin_object(object + 4)
+        this.put(out, "<< /Length ")
+        this.put_int(out, scratch.get_length() as int)
+        this.put(out, " >>\nstream\n")
+        out.add(scratch.as_slice())
+        this.put(out, "endstream\nendobj\n")
+    }
+
+    ; The name of a font given: six letters that say which of the fonts it
+    ; is and that it is a subset, then its PostScript name.
+    procedure put_font_name(mutable this, index: size_t)
+    {
+        var n index
+        var k 0
+        while k < 6
+        {
+            out.add(0x41 + ((n % 26) as u8))
+            n := n / 26
+            k := k + 1
+        }
+        out.add(0x2B)
+        let r index * PTT_SIZE
+        let at font_records[r + PTT_NAME] as size_t
+        let length font_records[r + PTT_NAME + 1] as size_t
+        if length = 0
+            this.put(out, "Font")
+        else
+            this.put_name(out, font_names.as_slice().subslice(at, at + length))
+    }
+
+    ; A character as the hexadecimal digits of its UTF-16 code units.
+    procedure put_utf16(this, mutable to: ref[Array[u8]], ch: int)
+    {
+        if ch >= 65536
+        {
+            let v ch - 65536
+            let high 55296 + (v >> 10)
+            let low 56320 + (v & 1023)
+            this.put_hex(to, ((high >> 8) & 255) as u8)
+            this.put_hex(to, (high & 255) as u8)
+            this.put_hex(to, ((low >> 8) & 255) as u8)
+            this.put_hex(to, (low & 255) as u8)
+            return
+        }
+        this.put_hex(to, ((ch >> 8) & 255) as u8)
+        this.put_hex(to, (ch & 255) as u8)
+    }
+
+    ; A text string of the document information: as it is while it is
+    ; ASCII, else in UTF-16 behind its byte order mark.
+    procedure put_text(this, mutable to: ref[Array[u8]], text: Slice[u8])
+    {
+        var plain true
+        var i: size_t 0
+        while i < text.length
+        {
+            if text[i] >= 0x80
+                plain := false
+            i := i + 1
+        }
+        if plain
+        {
+            this.put_string(to, text)
+            return
+        }
+        this.put(to, "<FEFF")
+        i := 0
+        while i < text.length
+        {
+            this.put_utf16(to, PdfFont.decode(text, i) as int)
+            i := i + PdfFont.decoded(text, i)
+        }
+        to.add(0x3E)
     }
 
     ; An image object: the dictionary, then the data as it came.

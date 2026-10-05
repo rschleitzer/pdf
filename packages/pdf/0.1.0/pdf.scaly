@@ -1,11 +1,13 @@
-; pdf -- writing PDF files: a document of pages carrying text in the standard
-; fonts, rules, filled rectangles and images, with named destinations and
-; page labels. No font is embedded and no library needed: an image goes in
-; as its file holds it, and the one that cannot -- a PNG with an alpha
-; channel -- is decoded here. What is written is PDF 1.4.
+; pdf -- writing PDF files: a document of pages carrying text, rules, filled
+; rectangles and images, with named destinations and page labels. Text is
+; UTF-8, in the standard fonts every reader has or in TrueType fonts the
+; document embeds with the glyphs it uses. No library is needed: an image
+; goes in as its file holds it, and the one that cannot -- a PNG with an
+; alpha channel -- is decoded here. What is written is PDF 1.4.
 ;
 ; The modules, in dependency order: the width table of the standard fonts
-; (generated), the fonts, the decoder, the document.
+; (generated), the standard fonts, the decoder, the TrueType reader, the
+; index of font files, the document.
 
 package scaly 0.1.0
 
@@ -14,5 +16,7 @@ define pdf
     module Metrics
     module Font
     module Inflate
+    module TrueType
+    module FontFiles
     module Document
 }

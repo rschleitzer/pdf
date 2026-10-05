@@ -1,0 +1,160 @@
+; FontFiles -- which TrueType font files there are, by the family name and
+; the style each file says it has.
+;
+; A program that sets text asks for a font by name -- "Times New Roman",
+; bold -- and a file has to be found for it. The names of font files follow
+; no rule, so the files are asked: `scan` reads from every `.ttf` file of a
+; directory, and of the directories in it, the family name in its name table
+; and the style in its header. Of a file only those few hundred bytes are
+; read. `find` then answers the path of the file for a family and style.
+;
+; A family here is what a font calls its family in the four styles regular,
+; bold, italic and bold italic (name 1 of the name table); a font beyond
+; those four -- a light or a condensed cut -- is a family of its own by that
+; name. Collections (`.ttc`) and fonts with PostScript outlines are left
+; out: the package embeds neither.
+
+use pdf.TrueType.PdfTrueType
+
+; an entry: where its family name and its path are in `text`, and its style
+define PFF_SIZE: size_t 5
+
+define PdfFontFiles
+(
+    ; per file: name at, name length, style (bit 0 bold, bit 1 italic),
+    ; path at, path length
+    var entries: Array[int]
+    var text: Array[u8]
+    ; what is read of a file
+    var buffer: Array[u8]
+)
+{
+    init()
+    {
+        entries := Array[int]^this()
+        text := Array[u8]^this()
+        buffer := Array[u8]^this()
+    }
+
+    function count(this) returns int
+        (entries.get_length() / PFF_SIZE) as int
+
+    ; Take the font files of a directory and of the directories in it, as
+    ; many levels down as `depth` says.
+    procedure scan(mutable this, directory: String, depth: int)
+    {
+        var path directory
+        let listed Directory.list(path)
+        var i: size_t 0
+        while i < listed.get_length()
+        {
+            let entry listed[i]
+            let full "`directory`/`entry.name`"
+            if entry.is_directory
+            {
+                if depth > 0
+                    this.scan(full, depth - 1)
+            }
+            else if entry.name.ends_with(".ttf") or entry.name.ends_with(".TTF")
+                this.add_file(full)
+            i := i + 1
+        }
+    }
+
+    ; Take one font file, if it is a TrueType font with TrueType outlines.
+    procedure add_file(mutable this, path: String)
+    {
+        let file fopen(path.to_c_string(), "rb")
+        if file = null
+            return
+        this.read_file(file, path)
+        fclose file
+    }
+
+    procedure read_file(mutable this, mutable file: pointer[OpaqueFile], path: String)
+    {
+        ; the head of the file and the directory of its tables
+        if this.read(file, 0, 12) = false
+            return
+        let version PdfTrueType.u32(buffer.as_slice(), 0)
+        if version <> 65536 and version <> 1953658213
+            return
+        let tables PdfTrueType.u16(buffer.as_slice(), 4) as size_t
+        if tables = 0 or tables > 256
+            return
+        if this.read(file, 0, 12 + tables * 16) = false
+            return
+        let directory buffer.as_slice()
+        let head PdfTrueType.entry(directory, 0, "head")
+        let name PdfTrueType.entry(directory, 0, "name")
+        if head = 0 or name = 0 or PdfTrueType.entry(directory, 0, "glyf") = 0
+            return
+        let head_at PdfTrueType.u32(directory, head + 8)
+        let name_at PdfTrueType.u32(directory, name + 8)
+        let name_length PdfTrueType.u32(directory, name + 12) as size_t
+        if name_length > 1048576
+            return
+        if this.read(file, head_at, 54) = false
+            return
+        let style PdfTrueType.u16(buffer.as_slice(), 44) & 3
+        if this.read(file, name_at, name_length) = false
+            return
+        let family_at text.get_length()
+        PdfTrueType.name(buffer.as_slice(), 0, 1, &text)
+        if text.get_length() = family_at
+            return
+        entries.add(family_at as int)
+        entries.add((text.get_length() - family_at) as int)
+        entries.add(style)
+        entries.add(text.get_length() as int)
+        entries.add(path.get_length() as int)
+        text.add(path.as_slice())
+    }
+
+    ; Read `length` bytes at `at` of the file into the buffer; false when
+    ; the file is shorter.
+    procedure read(mutable this, mutable file: pointer[OpaqueFile], at: int, length: size_t) returns bool
+    {
+        buffer.clear()
+        let view buffer.extend(length)
+        scaly_eio_seek(file, at, 0)
+        fread(view.data as pointer[void], 1, length, file) = length
+    }
+
+    ; The file of a family in a style, the family's name in any case of its
+    ; letters; an empty path when there is none.
+    function find(this, family: Slice[u8], bold: bool, italic: bool) returns String
+    {
+        var style 0
+        if bold
+            style := 1
+        if italic
+            style := style | 2
+        var i: size_t 0
+        while i < entries.get_length()
+        {
+            let at entries[i] as size_t
+            if entries[i + 2] = style and (entries[i + 1] as size_t) = family.length
+            {
+                var k: size_t 0
+                while k < family.length and PdfFontFiles.lower(text[at + k]) = PdfFontFiles.lower(family[k])
+                    k := k + 1
+                if k = family.length
+                {
+                    let start (text.get_buffer() + (entries[i + 3] as size_t)) as pointer[const_char]
+                    let length entries[i + 4] as size_t
+                    return String(start, length)
+                }
+            }
+            i := i + PFF_SIZE
+        }
+        String()
+    }
+
+    function lower(c: u8) returns u8
+    {
+        if c >= 0x41 and c <= 0x5A
+            return c + 0x20
+        c
+    }
+}
