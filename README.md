@@ -93,12 +93,13 @@ package pdf 0.1.0 "github.com/rschleitzer/pdf"
 the address the compiler looks for `packages/pdf` in the `packages` directory
 of the program that uses it, or of the installation.)
 
-**A published version does not change.** What the default branch here holds
-as `packages/pdf/<version>` is published: whoever fetched the version has
-exactly those files, and Scaly refuses a version that differs from what it
-fetched first. `scaly publish --check`, which the tests run, says so when a
-published directory is not what it was. A change to the package goes into a
-new version directory beside it.
+**A published version does not change.** `packages/pdf/published` names
+the published versions, each with the commit and the git tree of its
+directory; `scaly publish` writes the lines. Whoever fetched such a version
+has exactly those files. `scaly publish --check`, which the tests run, says
+so when a published directory or a line is not what it was, and when a new
+version's number understates what it changed. A change to the package goes
+into a new version directory.
 
 ```sh
 tests/run.sh

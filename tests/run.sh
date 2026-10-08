@@ -39,8 +39,8 @@ if python3 tools/metrics.py --check > "$TMP/metrics.log" 2>&1; then
 else
   fail=$((fail+1)); failures+=("metrics: $(head -1 "$TMP/metrics.log")")
 fi
-# a published version does not change: what the default branch of origin
-# holds is what is here. Not asked without the remote in reach or with a
+# a published version does not change, and a new one's number says what it
+# changed (packages/pdf/published). Not asked without the remote in reach or with a
 # scaly that has no `publish --check` yet -- said by name, never passed.
 "$SCALY" publish --check > "$TMP/publish.log" 2>&1; rc=$?
 if [ "$rc" = 0 ]; then
