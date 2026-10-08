@@ -2,7 +2,7 @@
 # tests/run.sh -- the pdf package: build every test program here with
 # `scaly build`, run it with freed memory poisoned, and compare its output
 # with its "; Expected:" line. Then the generated width table against its
-# generator.
+# generator, and the published versions against what they were published as.
 #
 #   tests/run.sh [scaly]      default: the `scaly` on the PATH, or SCALY
 #
@@ -38,6 +38,17 @@ if python3 tools/metrics.py --check > "$TMP/metrics.log" 2>&1; then
   pass=$((pass+1))
 else
   fail=$((fail+1)); failures+=("metrics: $(head -1 "$TMP/metrics.log")")
+fi
+# a published version does not change: what the default branch of origin
+# holds is what is here. Not asked without the remote in reach or with a
+# scaly that has no `publish --check` yet -- said by name, never passed.
+"$SCALY" publish --check > "$TMP/publish.log" 2>&1; rc=$?
+if [ "$rc" = 0 ]; then
+  pass=$((pass+1))
+elif [ "$rc" = 1 ] && grep -q 'a published version does not change' "$TMP/publish.log"; then
+  fail=$((fail+1)); failures+=("publish: $(sed -n 2p "$TMP/publish.log" | sed 's/^ *//')")
+else
+  echo "SKIP publish --check ($(head -1 "$TMP/publish.log" | cut -c1-100))"
 fi
 echo "pdf: $pass PASS, $fail FAIL"
 for x in "${failures[@]+"${failures[@]}"}"; do echo "  $x"; done

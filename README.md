@@ -83,9 +83,22 @@ interlaced PNG is refused.
 
 ## Build and test
 
-Install Scaly, put this repository's `packages/pdf` where the compiler finds
-it — in the `packages` directory of the program that uses it, or of the
-installation — and declare `package pdf 0.1.0`.
+Install Scaly and declare the package with where it comes from:
+
+```scaly
+package pdf 0.1.0 "github.com/rschleitzer/pdf"
+```
+
+`scaly build`, `run` and `test` fetch it with git the first time. (Without
+the address the compiler looks for `packages/pdf` in the `packages` directory
+of the program that uses it, or of the installation.)
+
+**A published version does not change.** What the default branch here holds
+as `packages/pdf/<version>` is published: whoever fetched the version has
+exactly those files, and Scaly refuses a version that differs from what it
+fetched first. `scaly publish --check`, which the tests run, says so when a
+published directory is not what it was. A change to the package goes into a
+new version directory beside it.
 
 ```sh
 tests/run.sh
