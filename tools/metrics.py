@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""metrics.py -- generate packages/pdf/0.1.1/pdf/Metrics.scaly from the AFM
+"""metrics.py -- generate packages/pdf/0.2.0/pdf/Metrics.scaly from the AFM
 files of the standard fonts (tools/afm/).
 
     tools/metrics.py [--check]
