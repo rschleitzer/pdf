@@ -25,7 +25,7 @@ it and does.
 ## Use
 
 ```scaly
-package scaly 0.1.0
+package scaly 0.2.0
 package pdf 0.1.0
 
 use pdf.Font.PdfFont
@@ -86,7 +86,7 @@ interlaced PNG is refused.
 Install Scaly and declare the package with where it comes from:
 
 ```scaly
-package pdf 0.1.0 "github.com/rschleitzer/pdf"
+package pdf 0.1.1 "github.com/rschleitzer/pdf"
 ```
 
 `scaly build`, `run` and `test` fetch it with git the first time. (Without
