@@ -8,7 +8,7 @@
 ; Expected: numbers 0 1 2 3 4 -1 -1 size 40 20 40 20 bytes 6623 31284
 
 package scaly 0.2.0
-package pdf 0.1.0
+package pdf 0.2.0
 
 use pdf.Document.PdfDocument
 

@@ -7,7 +7,7 @@
 ; Expected: width 53328 pages 1 bytes 1323 24949
 
 package scaly 0.2.0
-package pdf 0.1.0
+package pdf 0.2.0
 
 use pdf.Font.PdfFont
 use pdf.Document.PdfDocument

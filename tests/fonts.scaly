@@ -13,7 +13,7 @@
 ; Expected: files 2 1 1 0 numbers 12 13 -1 widths 9940 13540 4440 4370 8880 has 1 0 1 0 bytes 6588 34862
 
 package scaly 0.2.0
-package pdf 0.1.0
+package pdf 0.2.0
 
 use pdf.Font.PdfFont
 use pdf.FontFiles.PdfFontFiles
