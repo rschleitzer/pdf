@@ -959,7 +959,7 @@ define PdfDocument
         let file fopen(path.to_c_string(), "wb")
         if file = null
             return false
-        let written fwrite(bytes.data, 1, bytes.length, file)
+        let written fwrite(bytes.data, 1, bytes.length as c_size, file) as size_t
         fclose file
         written = bytes.length
     }

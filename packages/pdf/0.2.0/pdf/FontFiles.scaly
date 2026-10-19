@@ -118,7 +118,7 @@ define PdfFontFiles
         buffer.clear()
         let view buffer.extend(length)
         scaly_eio_seek(file, at, 0)
-        fread(view.data as pointer[void], 1, length, file) = length
+        (fread(view.data as pointer[void], 1, length as c_size, file) as size_t) = length
     }
 
     ; The file of a family in a style, the family's name in any case of its
