@@ -226,6 +226,37 @@ define PdfDocument
         sum * size / font_records[r + PTT_UNITS]
     }
 
+    ; The advance of one character in a font, in the font's own units (see
+    ; `units`): what `text` moves on by after it. A standard font's code is
+    ; that of `?` for a character it lacks, as `text` sets it.
+    function advance(this, font: int, ch: u32) returns int
+    {
+        if font < PDF_FONT_COUNT
+        {
+            var code PdfFont.encode(ch)
+            if code = 0
+                code := 0x3F
+            return PdfFont.width(font, code)
+        }
+        let r ((font - PDF_FONT_COUNT) as size_t) * PTT_SIZE
+        if r >= font_records.get_length()
+            return 0
+        let data font_data.as_slice()
+        PdfTrueType.advance(data, &font_records, r, PdfTrueType.glyph(data, &font_records, r, ch))
+    }
+
+    ; How many of a font's units make its size: 1000 for a standard font,
+    ; the units per em of a font given.
+    function units(this, font: int) returns int
+    {
+        if font < PDF_FONT_COUNT
+            return 1000
+        let r ((font - PDF_FONT_COUNT) as size_t) * PTT_SIZE
+        if r >= font_records.get_length()
+            return 1000
+        font_records[r + PTT_UNITS]
+    }
+
     ; True when the font has a glyph for the character.
     function has_character(this, font: int, ch: u32) returns bool
     {
