@@ -453,6 +453,27 @@ define PdfDocument
         this.put(content, " l S\n")
     }
 
+    ; A line with a dash pattern: `pattern` the lengths of dashes and gaps,
+    ; alternately (an odd number repeats with them alternating, as PDF does),
+    ; `phase` the offset into it where the line begins.
+    procedure dashed_line(mutable this, x1: int, y1: int, x2: int, y2: int, thickness: int, pattern: Slice[int], phase: int)
+    {
+        this.put(content, "q [")
+        var i: size_t 0
+        while i < pattern.length
+        {
+            if i > 0
+                content.add(0x20)
+            this.put_length(content, pattern[i])
+            i := i + 1
+        }
+        this.put(content, "] ")
+        this.put_length(content, phase)
+        this.put(content, " d ")
+        this.line(x1, y1, x2, y2, thickness)
+        this.put(content, "Q\n")
+    }
+
     ; A filled rectangle in a color of its own; (x, y) is its top left corner.
     procedure fill_rectangle(mutable this, x: int, y: int, width: int, height: int, red: int, green: int, blue: int)
     {
