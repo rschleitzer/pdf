@@ -245,6 +245,41 @@ define PdfDocument
         PdfTrueType.advance(data, &font_records, r, PdfTrueType.glyph(data, &font_records, r, ch))
     }
 
+    ; How far a font reaches below its baseline at a size, in the unit of
+    ; the size: the descender of its `hhea` table, a standard font's of its
+    ; metrics.
+    function descent(this, font: int, size: int) returns int
+    {
+        if font < PDF_FONT_COUNT
+            return PdfFont.descender(font) * size / 1000
+        let r ((font - PDF_FONT_COUNT) as size_t) * PTT_SIZE
+        if r >= font_records.get_length()
+            return size / 5
+        var down font_records[r + PTT_DESCENDER]
+        if down < 0
+            down := 0 - down
+        down * size / font_records[r + PTT_UNITS]
+    }
+
+    ; The height of a line of a font set solid at a size, in the unit of the
+    ; size: ascender, descender and line gap of its `hhea` table -- what a
+    ; word processor and PDFsharp call the font's line spacing. A standard
+    ; font has no line gap of its own: 1.15 times its size, the line spacing
+    ; of the faces a reader shows for Helvetica and Times.
+    function line_height(this, font: int, size: int) returns int
+    {
+        if font < PDF_FONT_COUNT
+            return size * 115 / 100
+        let r ((font - PDF_FONT_COUNT) as size_t) * PTT_SIZE
+        if r >= font_records.get_length()
+            return size * 115 / 100
+        var down font_records[r + PTT_DESCENDER]
+        if down < 0
+            down := 0 - down
+        let gap PdfTrueType.i16(font_data.as_slice(), (font_records[r + PTT_HHEA] as size_t) + 8)
+        (font_records[r + PTT_ASCENDER] + down + gap) * size / font_records[r + PTT_UNITS]
+    }
+
     ; How many of a font's units make its size: 1000 for a standard font,
     ; the units per em of a font given.
     function units(this, font: int) returns int
