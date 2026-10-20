@@ -15,7 +15,7 @@
 ; It holds the tables a PDF reader needs of an embedded font and no others.
 
 ; the record of a font: the offsets are into the caller's buffer
-define PTT_SIZE: size_t 34
+define PTT_SIZE: size_t 38
 define PTT_UNITS: size_t 0
 define PTT_GLYPHS: size_t 1
 define PTT_METRICS: size_t 2
@@ -44,6 +44,13 @@ define PTT_PREP: size_t 29
 define PTT_NAME: size_t 31
 ; head.macStyle: bit 0 bold, bit 1 italic
 define PTT_STYLE: size_t 33
+; where a score goes, in the font's units (0: the font does not say): the
+; underline below the baseline and its thickness (`post`), the line through
+; above it and the height of the capitals (`OS/2`)
+define PTT_UNDERLINE: size_t 34
+define PTT_UNDERLINE_THICKNESS: size_t 35
+define PTT_STRIKE: size_t 36
+define PTT_CAP_HEIGHT: size_t 37
 
 define PdfTrueType (unused: int)
 {
@@ -186,6 +193,28 @@ define PdfTrueType (unused: int)
             PdfTrueType.name(data, file + (PdfTrueType.u32(data, name + 8) as size_t), 6, names)
         records.add((names.get_length() as int) - records[records.get_length() - 1])
         records.add(PdfTrueType.u16(data, head_at + 44))
+        var underline 0
+        var underline_thickness 0
+        if post <> 0
+        {
+            let post_at file + (PdfTrueType.u32(data, post + 8) as size_t)
+            underline := PdfTrueType.i16(data, post_at + 8)
+            underline_thickness := PdfTrueType.i16(data, post_at + 10)
+        }
+        records.add(underline)
+        records.add(underline_thickness)
+        var strike 0
+        var cap 0
+        let os2 PdfTrueType.entry(data, font, "OS/2")
+        if os2 <> 0
+        {
+            let os2_at file + (PdfTrueType.u32(data, os2 + 8) as size_t)
+            strike := PdfTrueType.i16(data, os2_at + 28)
+            if PdfTrueType.u16(data, os2_at) >= 2
+                cap := PdfTrueType.i16(data, os2_at + 88)
+        }
+        records.add(strike)
+        records.add(cap)
         true
     }
 

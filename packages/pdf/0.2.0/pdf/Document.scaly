@@ -280,6 +280,54 @@ define PdfDocument
         (font_records[r + PTT_ASCENDER] + down + gap) * size / font_records[r + PTT_UNITS]
     }
 
+    ; Where a score goes in a font at a size, in the unit of the size, as
+    ; the font states it -- else what a word processor takes: how far the
+    ; underline lies below the baseline (a tenth of the size), its thickness
+    ; (a twentieth), how far the line through lies above the baseline (three
+    ; tenths) and the height of the capitals (seven tenths).
+    function underline(this, font: int, size: int) returns int
+    {
+        let v this.score_value(font, PTT_UNDERLINE)
+        if v = 0
+            return size / 10
+        (0 - v) * size / this.units(font)
+    }
+
+    function score_thickness(this, font: int, size: int) returns int
+    {
+        let v this.score_value(font, PTT_UNDERLINE_THICKNESS)
+        if v <= 0
+            return size / 20
+        v * size / this.units(font)
+    }
+
+    function strike(this, font: int, size: int) returns int
+    {
+        let v this.score_value(font, PTT_STRIKE)
+        if v <= 0
+            return size * 3 / 10
+        v * size / this.units(font)
+    }
+
+    function cap_height(this, font: int, size: int) returns int
+    {
+        let v this.score_value(font, PTT_CAP_HEIGHT)
+        if v <= 0
+            return size * 7 / 10
+        v * size / this.units(font)
+    }
+
+    ; a value of a font given's record; 0 for a standard font
+    function score_value(this, font: int, field: size_t) returns int
+    {
+        if font < PDF_FONT_COUNT
+            return 0
+        let r ((font - PDF_FONT_COUNT) as size_t) * PTT_SIZE
+        if r >= font_records.get_length()
+            return 0
+        font_records[r + field]
+    }
+
     ; How many of a font's units make its size: 1000 for a standard font,
     ; the units per em of a font given.
     function units(this, font: int) returns int
