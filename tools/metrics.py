@@ -14,7 +14,10 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-OUT = os.path.join(ROOT, "packages", "pdf", "0.1.0", "pdf", "Metrics.scaly")
+# the version being written: the one version directory the tree holds
+VERSION = max((d for d in os.listdir(os.path.join(ROOT, "packages", "pdf"))
+               if d[:1].isdigit()), key=lambda d: [int(p) for p in d.split(".")])
+OUT = os.path.join(ROOT, "packages", "pdf", VERSION, "pdf", "Metrics.scaly")
 
 # table order = font id of pdf.Font (family * 4 + bold + 2 * italic)
 FONTS = [

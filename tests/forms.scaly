@@ -1,0 +1,47 @@
+; Forms: the first page of a PDF goes in as a form XObject, its content
+; decoded, its resources copied as direct objects; a PDF whose resources hold
+; a stream (an image of its own) and what is no PDF are refused.
+;   numbers  what add_pdf answers for box.pdf, stream-resource.pdf and rgb.png
+;   size     what pdf_size reads from box.pdf, in thousandths of a point
+;   form     whether the file holds the form with its matrix
+;   bytes    the length of the file and the sum of its bytes
+; Expected: numbers 0 -1 -1 size 20000 14000 form yes bytes 902 60366
+
+package scaly 0.2.0
+package pdf 0.2.0
+
+use pdf.Document.PdfDocument
+
+procedure read(name: String) returns String
+    File.read_to_string("tests/data/`name`")
+
+procedure main(argc: int, argv: pointer[pointer[const_char]]) returns int
+{
+    var doc PdfDocument()
+    let box read(String("box.pdf"))
+    let a doc.add_pdf(box.as_slice())
+    let b doc.add_pdf(read(String("stream-resource.pdf")).as_slice())
+    let c doc.add_pdf(read(String("rgb.png")).as_slice())
+    var width 0
+    var height 0
+    PdfDocument.pdf_size(box.as_slice(), &width, &height)
+    doc.begin_page(100000, 60000)
+    doc.image(a, 10000, 10000, 40000, 28000)
+    doc.end_page()
+    let bytes doc.finish()
+    let text String(bytes.data as pointer[const_char], bytes.length)
+    var form "no"
+    if text.contains("/Subtype /Form /BBox [0 0 20 14] /Matrix [0.05 0 0 0.071428 0 0]")
+        form := "yes"
+    var sum 0
+    var i: size_t 0
+    while i < bytes.length
+    {
+        sum := (sum + (bytes[i] as int)) % 65521
+        i := i + 1
+    }
+    print "numbers `a` `b` `c` size `width` `height` form `form` bytes `bytes.length` `sum`\n"
+    if argc > 1
+        doc.write(String(*(argv + 1)))
+    0
+}

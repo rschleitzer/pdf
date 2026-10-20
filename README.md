@@ -79,7 +79,10 @@ number. There is no shaping: a character is its glyph, placed left to right.
 A JPEG and a PNG without alpha channel go into the file as they are. A PNG
 with an alpha channel is decoded, and its transparency becomes a soft mask;
 it is written run-length coded, which is the only compression here. An
-interlaced PNG is refused.
+interlaced PNG is refused. A PDF goes in as a form XObject of its first
+page: its content decoded (none or FlateDecode), its resources copied as
+direct objects. A PDF whose objects lie in object streams, or whose page's
+resources hold a stream of their own (a font, an image), is refused.
 
 ## Build and test
 

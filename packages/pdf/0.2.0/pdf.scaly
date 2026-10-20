@@ -3,11 +3,12 @@
 ; UTF-8, in the standard fonts every reader has or in TrueType fonts the
 ; document embeds with the glyphs it uses. No library is needed: an image
 ; goes in as its file holds it, and the one that cannot -- a PNG with an
-; alpha channel -- is decoded here. What is written is PDF 1.4.
+; alpha channel -- is decoded here; an image given as a PDF goes in as a
+; form of its first page. What is written is PDF 1.4.
 ;
 ; The modules, in dependency order: the width table of the standard fonts
 ; (generated), the standard fonts, the decoder, the TrueType reader, the
-; index of font files, the document.
+; index of font files, the reader of PDF objects, the document.
 
 package scaly 0.2.0
 
@@ -18,5 +19,6 @@ define pdf
     module Inflate
     module TrueType
     module FontFiles
+    module Objects
     module Document
 }

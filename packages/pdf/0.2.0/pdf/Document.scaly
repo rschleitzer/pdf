@@ -20,6 +20,7 @@
 use pdf.Font.PdfFont
 use pdf.Inflate.PdfInflate
 use pdf.TrueType.PdfTrueType
+use pdf.Objects.PdfObjects
 
 ; the stride of the flat records
 define PDF_IMAGE_REC: size_t 11
@@ -34,6 +35,10 @@ define PDF_IMAGE_PNG: int 1
 define PDF_FONT_REC: size_t 3
 ; rows decoded and run-length coded again (a PNG with an alpha channel)
 define PDF_IMAGE_RUNS: int 2
+; the first page of a PDF, as a form: its content decoded; the record's width
+; and height are the page's in thousandths of a point, its components and
+; bits the lower left corner, its palette the resources (PdfObjects)
+define PDF_IMAGE_FORM: int 3
 
 define PdfDocument
 (
@@ -539,6 +544,69 @@ define PdfDocument
     function image_height(this, number: int) returns int
         images[(number as size_t) * PDF_IMAGE_REC + 4]
 
+    ; Take the first page of a PDF file as a form. Answers the image's
+    ; number, -1 for what PdfObjects does not read.
+    procedure add_pdf(mutable this, data: Slice[u8]) returns int
+    {
+        if data.length < 5 or data[0] <> 0x25 or data[1] <> 0x50 or data[2] <> 0x44 or data[3] <> 0x46
+            return 0 - 1
+        var x 0
+        var y 0
+        var w 0
+        var h 0
+        if PdfObjects.media_box(data, &x, &y, &w, &h) = false
+            return 0 - 1
+        let page PdfObjects.first_page(data)
+        ; the content: one stream or an array of them, one after the other
+        let content_at image_data.get_length()
+        let contents_at PdfObjects.lookup(data, page, "Contents")
+        if contents_at <> 0
+        {
+            let contents PdfObjects.resolve(data, contents_at)
+            if contents = 0
+                return 0 - 1
+            if data[contents] = 0x5B
+            {
+                var at contents + 1
+                repeat
+                {
+                    at := PdfObjects.skip_space(data, at)
+                    if at >= data.length
+                        return 0 - 1
+                    if data[at] = 0x5D
+                        break
+                    if PdfObjects.stream_data(data, PdfObjects.resolve(data, at), &image_data) = false
+                        return 0 - 1
+                    image_data.add(0x0A)
+                    at := PdfObjects.skip_value(data, at)
+                }
+            }
+            else if PdfObjects.stream_data(data, contents, &image_data) = false
+                return 0 - 1
+        }
+        let content_length image_data.get_length() - content_at
+        ; the resources, direct
+        let resources_at image_data.get_length()
+        let resources PdfObjects.inherited(data, page, "Resources")
+        if resources = 0
+            image_data.add("<< >>")
+        else if PdfObjects.copy_direct(data, resources, &image_data, 0) = false
+            return 0 - 1
+        let resources_length image_data.get_length() - resources_at
+        images.add(PDF_IMAGE_FORM)
+        images.add(content_at as int)
+        images.add(content_length as int)
+        images.add(w)
+        images.add(h)
+        images.add(x)
+        images.add(y)
+        images.add(resources_at as int)
+        images.add(resources_length as int)
+        images.add(0)
+        images.add(0)
+        this.image_count() - 1
+    }
+
     ; Take a JPEG file as it is. Answers the image's number, -1 when the
     ; bytes are no baseline or progressive JPEG.
     procedure add_jpeg(mutable this, data: Slice[u8]) returns int
@@ -785,8 +853,32 @@ define PdfDocument
 
     ; The size in pixels of an image file, without taking it: true for a
     ; JPEG or PNG whose head can be read.
+    ; The size of a PDF's first page in thousandths of a point; false for
+    ; what is no PDF PdfObjects reads.
+    procedure pdf_size(data: Slice[u8], mutable width: ref[int], mutable height: ref[int]) returns bool
+    {
+        if data.length < 5 or data[0] <> 0x25 or data[1] <> 0x50 or data[2] <> 0x44 or data[3] <> 0x46
+            return false
+        var x 0
+        var y 0
+        PdfObjects.media_box(data, &x, &y, &width, &height)
+    }
+
     procedure probe(data: Slice[u8], mutable width: ref[int], mutable height: ref[int]) returns bool
     {
+        ; a PDF: the size of its first page, in points
+        if data.length >= 5 and data[0] = 0x25 and data[1] = 0x50 and data[2] = 0x44 and data[3] = 0x46
+        {
+            var x 0
+            var y 0
+            var w 0
+            var h 0
+            if PdfObjects.media_box(data, &x, &y, &w, &h) = false
+                return false
+            width := (w + 500) / 1000
+            height := (h + 500) / 1000
+            return true
+        }
         if data.length >= 33 and data[0] = 0x89 and data[1] = 0x50 and data[2] = 0x4E and data[3] = 0x47
         {
             width := ((data[16] as int) << 24) | ((data[17] as int) << 16) | ((data[18] as int) << 8) | (data[19] as int)
@@ -1360,6 +1452,38 @@ define PdfDocument
         let components images[rec + 5]
         let bits images[rec + 6]
         this.begin_object(number)
+        if kind = PDF_IMAGE_FORM
+        {
+            ; a form whose matrix maps its page onto the unit square, where
+            ; an image is drawn
+            let w images[rec + 3]
+            let h images[rec + 4]
+            this.put(out, "<< /Type /XObject /Subtype /Form /BBox [")
+            this.put_length(out, components)
+            out.add(0x20)
+            this.put_length(out, bits)
+            out.add(0x20)
+            this.put_length(out, components + w)
+            out.add(0x20)
+            this.put_length(out, bits + h)
+            this.put(out, "] /Matrix [")
+            this.put_fraction(out, 1000, w)
+            this.put(out, " 0 0 ")
+            this.put_fraction(out, 1000, h)
+            out.add(0x20)
+            this.put_fraction(out, 0 - components, w)
+            out.add(0x20)
+            this.put_fraction(out, 0 - bits, h)
+            this.put(out, "] /Resources ")
+            let resources_at images[rec + 7] as size_t
+            out.add(image_data.as_slice().subslice(resources_at, resources_at + (images[rec + 8] as size_t)))
+            this.put(out, " /Length ")
+            this.put_int(out, length as int)
+            this.put(out, " >>\nstream\n")
+            out.add(image_data.as_slice().subslice(at, at + length))
+            this.put(out, "\nendstream\nendobj\n")
+            return
+        }
         this.put(out, "<< /Type /XObject /Subtype /Image /Width ")
         this.put_int(out, images[rec + 3])
         this.put(out, " /Height ")
@@ -1506,6 +1630,29 @@ define PdfDocument
     }
 
     ; A length in thousandths of a point, written in points.
+    ; num / den with six places: what a form's matrix needs of 1 / 13.8.
+    procedure put_fraction(this, mutable to: ref[Array[u8]], num: int, den: int)
+    {
+        var n (num as i64) * 1000000 / (den as i64)
+        if n < 0
+        {
+            to.add(0x2D)
+            n := 0 - n
+        }
+        this.put_int(to, (n / 1000000) as int)
+        var rest n % 1000000
+        if rest = 0
+            return
+        to.add(0x2E)
+        var unit: i64 100000
+        while rest > 0
+        {
+            to.add((0x30 + rest / unit) as u8)
+            rest := rest % unit
+            unit := unit / 10
+        }
+    }
+
     procedure put_length(this, mutable to: ref[Array[u8]], value: int)
     {
         var v value

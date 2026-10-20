@@ -1,2 +1,4 @@
 .DS_Store
 *.pdf
+# the PDFs the tests read are inputs
+!tests/data/*.pdf
