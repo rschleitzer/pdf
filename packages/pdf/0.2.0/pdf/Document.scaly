@@ -798,6 +798,61 @@ define PdfDocument
         false
     }
 
+    ; The resolution an image states, in thousandths of a pixel to the inch,
+    ; across and down: a PNG's pHYs chunk in pixels to the meter, a JPEG's
+    ; JFIF density in dots to the inch or to the centimeter; 72 to the inch
+    ; where it states none, as PDFsharp takes it.
+    procedure resolution(data: Slice[u8], mutable across: ref[int], mutable down: ref[int])
+    {
+        across := 72000
+        down := 72000
+        if data.length >= 33 and data[0] = 0x89 and data[1] = 0x50 and data[2] = 0x4E and data[3] = 0x47
+        {
+            var at: size_t 8
+            while at + 12 <= data.length
+            {
+                let length (((data[at] as size_t) << 24) | ((data[at + 1] as size_t) << 16) | ((data[at + 2] as size_t) << 8) | (data[at + 3] as size_t))
+                if data[at + 4] = 0x70 and data[at + 5] = 0x48 and data[at + 6] = 0x59 and data[at + 7] = 0x73 and length = 9 and at + 17 <= data.length
+                {
+                    let x ((data[at + 8] as int) << 24) | ((data[at + 9] as int) << 16) | ((data[at + 10] as int) << 8) | (data[at + 11] as int)
+                    let y ((data[at + 12] as int) << 24) | ((data[at + 13] as int) << 16) | ((data[at + 14] as int) << 8) | (data[at + 15] as int)
+                    ; unit 1: the meter
+                    if data[at + 16] = 1 and x > 0 and y > 0
+                    {
+                        across := x * 254 / 10
+                        down := y * 254 / 10
+                    }
+                    return
+                }
+                ; the chunks that may stand before it end at the rows
+                if data[at + 4] = 0x49 and data[at + 5] = 0x44 and data[at + 6] = 0x41 and data[at + 7] = 0x54
+                    return
+                at := at + 12 + length
+            }
+            return
+        }
+        ; JFIF: APP0 right after the start of the image
+        if data.length >= 18 and data[0] = 0xFF and data[1] = 0xD8 and data[2] = 0xFF and data[3] = 0xE0 and data[6] = 0x4A and data[7] = 0x46 and data[8] = 0x49 and data[9] = 0x46 and data[10] = 0
+        {
+            let units data[13]
+            let x ((data[14] as int) << 8) | (data[15] as int)
+            let y ((data[16] as int) << 8) | (data[17] as int)
+            if x > 0 and y > 0
+            {
+                if units = 1
+                {
+                    across := x * 1000
+                    down := y * 1000
+                }
+                else if units = 2
+                {
+                    across := x * 2540
+                    down := y * 2540
+                }
+            }
+        }
+    }
+
     function be32(this, data: Slice[u8], at: size_t) returns int
         ((data[at] as int) << 24) | ((data[at + 1] as int) << 16) | ((data[at + 2] as int) << 8) | (data[at + 3] as int)
 
