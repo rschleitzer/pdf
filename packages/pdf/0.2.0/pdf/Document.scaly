@@ -534,6 +534,25 @@ define PdfDocument
 
     ; ---- images ---------------------------------------------------------------
 
+    ; Whether image `number` is the first page of a PDF, and its box and
+    ; decoded content (in thousandths of a point, origin at the lower left):
+    ; what draws it where no PDF reader is.
+    function is_form(this, number: int) returns bool
+        number >= 0 and number < this.image_count() and images[(number as size_t) * PDF_IMAGE_REC] = PDF_IMAGE_FORM
+
+    function form_x(this, number: int) returns int
+        images[(number as size_t) * PDF_IMAGE_REC + 5]
+
+    function form_y(this, number: int) returns int
+        images[(number as size_t) * PDF_IMAGE_REC + 6]
+
+    function form_content(this, number: int) returns Slice[u8]
+    {
+        let rec (number as size_t) * PDF_IMAGE_REC
+        let at images[rec + 1] as size_t
+        image_data.as_slice().subslice(at, at + (images[rec + 2] as size_t))
+    }
+
     function image_count(this) returns int
         (images.get_length() / PDF_IMAGE_REC) as int
 
