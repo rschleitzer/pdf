@@ -74,6 +74,8 @@ define PdfDocument
     var open: bool
     var cur_height: int
     var cur_color: int
+    ; the space after every character (Tc), in thousandths of a point
+    var cur_spacing: int
     ; the file, once finished
     var out: Array[u8]
     var offsets: Array[size_t]
@@ -102,6 +104,7 @@ define PdfDocument
         open := false
         cur_height := 0
         cur_color := 0 - 1
+        cur_spacing := 0
         out := Array[u8]^this()
         offsets := Array[size_t]^this()
     }
@@ -116,6 +119,7 @@ define PdfDocument
         open := true
         cur_height := height
         cur_color := 0 - 1
+        cur_spacing := 0
     }
 
     procedure end_page(mutable this)
@@ -353,6 +357,11 @@ define PdfDocument
 
     ; A run of text with its baseline at y, beginning at x.
     procedure text(mutable this, font: int, size: int, x: int, y: int, text: Slice[u8])
+        this.spaced_text(font, size, x, y, text, 0)
+
+    ; A run of text with `spacing` after every character of it, the last and
+    ; a space included (in thousandths of a point; negative narrows).
+    procedure spaced_text(mutable this, font: int, size: int, x: int, y: int, text: Slice[u8], spacing: int)
     {
         if text.length = 0
             return
@@ -364,6 +373,14 @@ define PdfDocument
         content.add(0x20)
         this.put_length(content, size)
         this.put(content, " Tf ")
+        ; the character spacing is part of the graphics state: set where it
+        ; changes
+        if spacing <> cur_spacing
+        {
+            this.put_length(content, spacing)
+            this.put(content, " Tc ")
+            cur_spacing := spacing
+        }
         this.put_length(content, x)
         content.add(0x20)
         this.put_length(content, cur_height - y)
